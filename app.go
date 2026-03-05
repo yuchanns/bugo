@@ -1,0 +1,865 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/go-kratos/blades"
+	"github.com/go-kratos/blades/contrib/openai"
+	"github.com/go-kratos/blades/skills"
+	"github.com/go-kratos/blades/tools"
+	"github.com/go-telegram/bot"
+	"github.com/go-telegram/bot/models"
+)
+
+type App struct {
+	cfg      Config
+	tapes    *TapeStore
+	sessions *SessionStore
+	inboxes  *inboxHub
+	runner   *blades.Runner
+	bot      *bot.Bot
+	botUser  *models.User
+}
+
+func NewApp(cfg Config) (*App, error) {
+	if err := os.MkdirAll(cfg.HomeDir, 0o755); err != nil {
+		return nil, err
+	}
+
+	tapes, err := NewTapeStore(filepath.Join(cfg.HomeDir, "tapes"))
+	if err != nil {
+		return nil, err
+	}
+	sessions := NewSessionStore(tapes)
+
+	app := &App{
+		cfg:      cfg,
+		tapes:    tapes,
+		sessions: sessions,
+		inboxes:  newInboxHub(sessions),
+	}
+
+	agent, err := app.buildAgent()
+	if err != nil {
+		return nil, err
+	}
+	app.runner = blades.NewRunner(agent, blades.WithResumable(true))
+	return app, nil
+}
+
+func (a *App) buildAgent() (blades.Agent, error) {
+	modelConfig := openai.Config{
+		BaseURL:         a.cfg.APIBase,
+		APIKey:          a.cfg.APIKey,
+		MaxOutputTokens: int64(a.cfg.MaxOutputTokens),
+	}
+	model := openai.NewModel(a.cfg.Model, modelConfig)
+
+	baseTools, err := a.buildTools()
+	if err != nil {
+		return nil, err
+	}
+
+	skillList, err := a.loadSkills()
+	if err != nil {
+		return nil, err
+	}
+	tools := baseTools
+	instruction := a.systemInstruction()
+
+	return blades.NewAgent(
+		"bugo",
+		blades.WithModel(model),
+		blades.WithInstruction(instruction),
+		blades.WithTools(tools...),
+		blades.WithSkills(skillList...),
+		blades.WithMiddleware(
+			historyMiddleware(a.cfg.HistoryLimit),
+			WithPatchedListSkill(),
+		),
+		blades.WithMaxIterations(a.cfg.ModelMaxIterations),
+	)
+}
+
+func (a *App) loadSkills() ([]skills.Skill, error) {
+	builtin, err := skills.NewFromEmbed(builtinSkillsFS)
+	if err != nil {
+		return nil, err
+	}
+
+	var external []skills.Skill
+	if dir := strings.TrimSpace(a.cfg.ExtraSkillsDir); dir != "" {
+		info, err := os.Stat(dir)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				return nil, err
+			}
+		} else {
+			if !info.IsDir() {
+				return nil, fmt.Errorf("extra skills path is not a directory: %s", dir)
+			}
+			external, err = skills.NewFromDir(dir)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	merged := mergeSkills(builtin, external)
+	log.Printf("loaded skills: builtin=%d external=%d merged=%d", len(builtin), len(external), len(merged))
+	return merged, nil
+}
+
+func mergeSkills(base []skills.Skill, extra []skills.Skill) []skills.Skill {
+	merged := make(map[string]skills.Skill, len(base)+len(extra))
+	for _, s := range base {
+		if s == nil {
+			continue
+		}
+		merged[s.Name()] = s
+	}
+	for _, s := range extra {
+		if s == nil {
+			continue
+		}
+		// External skills override embedded skills with same name.
+		merged[s.Name()] = s
+	}
+
+	names := make([]string, 0, len(merged))
+	for name := range merged {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	out := make([]skills.Skill, 0, len(names))
+	for _, name := range names {
+		out = append(out, merged[name])
+	}
+	return out
+}
+
+func (a *App) buildTools() ([]tools.Tool, error) {
+	allTools := make([]tools.Tool, 0, 8)
+
+	telegramSend, err := tools.NewFunc(
+		"telegram_send",
+		"Send a message to Telegram. If chat_id is omitted, use current session chat.",
+		a.handleTelegramSendTool,
+	)
+	if err != nil {
+		return nil, err
+	}
+	allTools = append(allTools, telegramSend)
+
+	tapeRecent, err := tools.NewFunc(
+		"tape_recent",
+		"Get latest tape records from current session.",
+		a.handleTapeRecentTool,
+	)
+	if err != nil {
+		return nil, err
+	}
+	allTools = append(allTools, tapeRecent)
+
+	tapeSearch, err := tools.NewFunc(
+		"tape_search",
+		"Search tape records in current session.",
+		a.handleTapeSearchTool,
+	)
+	if err != nil {
+		return nil, err
+	}
+	allTools = append(allTools, tapeSearch)
+
+	tapeHandoff, err := tools.NewFunc(
+		"tape_handoff",
+		"Write a compact handoff summary into tape.",
+		a.handleTapeHandoffTool,
+	)
+	if err != nil {
+		return nil, err
+	}
+	allTools = append(allTools, tapeHandoff)
+	return allTools, nil
+}
+
+func (a *App) systemInstruction() string {
+	return strings.TrimSpace(`
+You are a Telegram coding agent running inside Bugo.
+
+Rules:
+1. Use tools for actions whenever possible.
+2. If you need to actively send a Telegram message, use tool "telegram_send".
+3. You can inspect or summarize long context with tape tools: tape_recent, tape_search, tape_handoff.
+4. Keep replies concise and actionable.
+5. Session metadata is stored in state keys like "chat_id", "session_id", "channel".
+6. If you are in proactive mode, do not assume framework will auto-send your assistant text.
+`)
+}
+
+func (a *App) Run(ctx context.Context) error {
+	httpClient, err := a.buildHTTPClient()
+	if err != nil {
+		return err
+	}
+
+	opts := []bot.Option{
+		bot.WithDefaultHandler(a.onUpdate),
+		bot.WithAllowedUpdates(bot.AllowedUpdates{models.AllowedUpdateMessage}),
+		bot.WithWorkers(a.cfg.TelegramWorkers),
+	}
+	if httpClient != nil {
+		opts = append(opts, bot.WithHTTPClient(time.Minute, httpClient))
+	}
+
+	botClient, err := bot.New(a.cfg.TelegramToken, opts...)
+	if err != nil {
+		return err
+	}
+	a.bot = botClient
+	a.botUser, _ = botClient.GetMe(ctx)
+	if a.botUser != nil {
+		log.Printf("telegram bot ready: id=%d username=%s", a.botUser.ID, a.botUser.Username)
+	}
+	log.Printf("bugo started: model=%s proactive=%v", a.cfg.Model, a.cfg.ProactiveResponse)
+	botClient.Start(ctx)
+	return nil
+}
+
+func (a *App) buildHTTPClient() (*http.Client, error) {
+	if strings.TrimSpace(a.cfg.TelegramProxy) == "" {
+		return nil, nil
+	}
+	u, err := url.Parse(a.cfg.TelegramProxy)
+	if err != nil {
+		return nil, err
+	}
+	tr := &http.Transport{
+		Proxy: http.ProxyURL(u),
+	}
+	return &http.Client{
+		Timeout:   time.Minute,
+		Transport: tr,
+	}, nil
+}
+
+func (a *App) onUpdate(ctx context.Context, _ *bot.Bot, update *models.Update) {
+	if update == nil || update.Message == nil {
+		return
+	}
+	msg := update.Message
+	content, media := parseMessageContent(msg)
+	if !a.isChatAllowed(msg.Chat.ID) {
+		return
+	}
+	if !a.isSenderAllowed(msg.From) {
+		_, _ = a.bot.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: msg.Chat.ID,
+			Text:   "Access denied.",
+		})
+		return
+	}
+
+	if content == "" {
+		return
+	}
+	if content == "/start" {
+		_, _ = a.bot.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: msg.Chat.ID,
+			Text:   "Bugo is online. Send text to start.",
+		})
+		return
+	}
+	if strings.HasPrefix(content, "/bub ") {
+		content = strings.TrimSpace(strings.TrimPrefix(content, "/bub "))
+	}
+	if content == "" {
+		return
+	}
+
+	sessionID := fmt.Sprintf("telegram:%d", msg.Chat.ID)
+	inbox := a.inboxes.Get(sessionID, msg.Chat.ID)
+	inbox.session.SetState("session_id", sessionID)
+	inbox.session.SetState("channel", "telegram")
+	inbox.session.SetState("chat_id", msg.Chat.ID)
+	if msg.From != nil {
+		inbox.session.SetState("sender_id", msg.From.ID)
+		if msg.From.Username != "" {
+			inbox.session.SetState("sender_username", msg.From.Username)
+		}
+	}
+
+	isCommand := strings.HasPrefix(strings.TrimSpace(content), ",")
+	if isCommand {
+		a.handleCommand(ctx, inbox, content)
+		return
+	}
+
+	mentioned := a.isMentioned(msg, content)
+	prompt := a.buildPromptPayload(msg, content, media)
+	a.enqueuePrompt(inbox, prompt, mentioned)
+}
+
+func (a *App) buildPromptPayload(msg *models.Message, content string, media map[string]any) string {
+	meta := map[string]any{
+		"message":       content,
+		"chat_id":       strconv.FormatInt(msg.Chat.ID, 10),
+		"message_id":    msg.ID,
+		"type":          messageType(msg),
+		"sender_id":     senderID(msg),
+		"sender_is_bot": senderIsBot(msg),
+		"username":      senderUsername(msg),
+		"full_name":     senderFullName(msg),
+		"date":          msg.Date,
+	}
+	if len(media) > 0 {
+		meta["media"] = media
+	}
+	if msg.ReplyToMessage != nil {
+		meta["reply_to_message"] = map[string]any{
+			"message_id": msg.ReplyToMessage.ID,
+			"sender_id":  senderID(msg.ReplyToMessage),
+			"text":       msg.ReplyToMessage.Text,
+		}
+	}
+	b, err := json.Marshal(meta)
+	if err != nil {
+		return content
+	}
+	return string(b)
+}
+
+func (a *App) isMentioned(msg *models.Message, content string) bool {
+	if msg == nil {
+		return false
+	}
+	switch msg.Chat.Type {
+	case models.ChatTypePrivate:
+		return true
+	case models.ChatTypeGroup, models.ChatTypeSupergroup:
+		if msg.ReplyToMessage != nil && msg.ReplyToMessage.From != nil && a.botUser != nil {
+			if msg.ReplyToMessage.From.ID == a.botUser.ID {
+				return true
+			}
+		}
+		lower := strings.ToLower(content)
+		if strings.Contains(lower, "bub") {
+			return true
+		}
+		if a.botUser != nil && a.botUser.Username != "" {
+			if strings.Contains(lower, "@"+strings.ToLower(a.botUser.Username)) {
+				return true
+			}
+		}
+		for _, e := range append(msg.Entities, msg.CaptionEntities...) {
+			if e.Type == models.MessageEntityTypeTextMention && e.User != nil && a.botUser != nil && e.User.ID == a.botUser.ID {
+				return true
+			}
+		}
+		return false
+	default:
+		return false
+	}
+}
+
+func (a *App) enqueuePrompt(inbox *sessionInbox, prompt string, mentioned bool) {
+	now := time.Now()
+	inbox.mu.Lock()
+	defer inbox.mu.Unlock()
+
+	if !mentioned {
+		if inbox.lastMention.IsZero() || now.Sub(inbox.lastMention) > time.Duration(a.cfg.ActiveWindow)*time.Second {
+			return
+		}
+	}
+
+	inbox.pending = append(inbox.pending, prompt)
+	timeout := time.Duration(a.cfg.MessageDelay) * time.Second
+	if mentioned {
+		inbox.lastMention = now
+		timeout = time.Duration(a.cfg.DebounceSeconds) * time.Second
+	}
+
+	if inbox.timer != nil {
+		inbox.timer.Stop()
+	}
+	inbox.timer = time.AfterFunc(timeout, func() {
+		a.flushInbox(inbox)
+	})
+}
+
+func (a *App) flushInbox(inbox *sessionInbox) {
+	inbox.mu.Lock()
+	if inbox.running {
+		inbox.mu.Unlock()
+		return
+	}
+	if len(inbox.pending) == 0 {
+		inbox.mu.Unlock()
+		return
+	}
+	prompt := strings.Join(inbox.pending, "\n")
+	chatID := inbox.chatID
+	session := inbox.session
+	inbox.pending = nil
+	inbox.running = true
+	inbox.mu.Unlock()
+
+	cancelTyping := a.startTyping(chatID)
+	response, err := a.runModelPrompt(session, prompt)
+	cancelTyping()
+
+	if err != nil {
+		log.Printf("run prompt error session=%s err=%v", session.ID(), err)
+		if sendErr := a.sendText(context.Background(), chatID, "Error: "+err.Error()); sendErr != nil {
+			log.Printf("send error message failed session=%s chat_id=%d err=%v", session.ID(), chatID, sendErr)
+		}
+	} else if !a.cfg.ProactiveResponse && strings.TrimSpace(response) != "" {
+		if sendErr := a.sendText(context.Background(), chatID, response); sendErr != nil {
+			log.Printf("send assistant response failed session=%s chat_id=%d err=%v", session.ID(), chatID, sendErr)
+		}
+	}
+
+	inbox.mu.Lock()
+	inbox.running = false
+	if len(inbox.pending) > 0 {
+		if inbox.timer != nil {
+			inbox.timer.Stop()
+		}
+		inbox.timer = time.AfterFunc(time.Duration(a.cfg.MessageDelay)*time.Second, func() {
+			a.flushInbox(inbox)
+		})
+	}
+	inbox.mu.Unlock()
+}
+
+func (a *App) runModelPrompt(session *TapeSession, prompt string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), a.cfg.ModelTimeout)
+	defer cancel()
+
+	var (
+		deltaBuilder strings.Builder
+		finalText    string
+		eventCount   int
+		deltaCount   int
+		finalCount   int
+		toolCount    int
+	)
+
+	for out, err := range a.runner.RunStream(ctx, blades.UserMessage(prompt), blades.WithSession(session)) {
+		if err != nil {
+			return "", err
+		}
+		eventCount++
+		if out == nil {
+			continue
+		}
+		if out.Role == blades.RoleTool {
+			toolCount++
+		}
+		if out.Role != blades.RoleAssistant {
+			continue
+		}
+
+		text := out.Text()
+		if strings.TrimSpace(text) == "" {
+			continue
+		}
+
+		switch out.Status {
+		case blades.StatusCompleted:
+			finalText = strings.TrimSpace(text)
+			finalCount++
+		case blades.StatusIncomplete, blades.StatusInProgress:
+			deltaBuilder.WriteString(text)
+			deltaCount++
+		}
+	}
+	if finalText != "" {
+		return finalText, nil
+	}
+	streamText := strings.TrimSpace(deltaBuilder.String())
+	if streamText != "" {
+		return streamText, nil
+	}
+	return "", fmt.Errorf(
+		"empty model output: events=%d assistant_deltas=%d assistant_finals=%d tool_events=%d",
+		eventCount,
+		deltaCount,
+		finalCount,
+		toolCount,
+	)
+}
+
+func (a *App) handleCommand(ctx context.Context, inbox *sessionInbox, content string) {
+	cmd := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(content), ","))
+	if cmd == "" {
+		_ = a.sendText(ctx, inbox.chatID, "Empty command. Use ,help.")
+		return
+	}
+
+	fields := strings.Fields(cmd)
+	switch fields[0] {
+	case "help":
+		_ = a.sendText(ctx, inbox.chatID, "Commands:\n,help\n,tape recent [n]\n,tape search <query>")
+	case "tape":
+		a.handleTapeCommand(ctx, inbox, fields[1:])
+	default:
+		_ = a.sendText(ctx, inbox.chatID, "Unknown command: "+fields[0])
+	}
+}
+
+func (a *App) handleTapeCommand(ctx context.Context, inbox *sessionInbox, args []string) {
+	if len(args) == 0 {
+		_ = a.sendText(ctx, inbox.chatID, "Usage: ,tape recent [n] | ,tape search <query>")
+		return
+	}
+	switch args[0] {
+	case "recent":
+		limit := 10
+		if len(args) >= 2 {
+			if v, err := strconv.Atoi(args[1]); err == nil && v > 0 {
+				limit = v
+			}
+		}
+		records, err := a.tapes.Recent(inbox.session.ID(), limit)
+		if err != nil {
+			_ = a.sendText(ctx, inbox.chatID, "Error: "+err.Error())
+			return
+		}
+		a.sendJSON(ctx, inbox.chatID, records)
+	case "search":
+		if len(args) < 2 {
+			_ = a.sendText(ctx, inbox.chatID, "Usage: ,tape search <query>")
+			return
+		}
+		query := strings.Join(args[1:], " ")
+		records, err := a.tapes.Search(inbox.session.ID(), query, 20)
+		if err != nil {
+			_ = a.sendText(ctx, inbox.chatID, "Error: "+err.Error())
+			return
+		}
+		a.sendJSON(ctx, inbox.chatID, records)
+	default:
+		_ = a.sendText(ctx, inbox.chatID, "Unknown tape command: "+args[0])
+	}
+}
+
+func (a *App) startTyping(chatID int64) func() {
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		ticker := time.NewTicker(4 * time.Second)
+		defer ticker.Stop()
+		for {
+			_, _ = a.bot.SendChatAction(ctx, &bot.SendChatActionParams{
+				ChatID: chatID,
+				Action: models.ChatActionTyping,
+			})
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+	return cancel
+}
+
+func (a *App) sendJSON(ctx context.Context, chatID int64, value any) {
+	b, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		_ = a.sendText(ctx, chatID, "Error: "+err.Error())
+		return
+	}
+	_ = a.sendText(ctx, chatID, string(b))
+}
+
+func (a *App) sendText(ctx context.Context, chatID int64, text string) error {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return nil
+	}
+	parts := splitTextByRunes(text, 3500)
+	for _, part := range parts {
+		if _, err := a.bot.SendMessage(ctx, &bot.SendMessageParams{
+			ChatID: chatID,
+			Text:   part,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func splitTextByRunes(text string, limit int) []string {
+	if limit <= 0 {
+		return []string{text}
+	}
+	runes := []rune(text)
+	if len(runes) <= limit {
+		return []string{text}
+	}
+	chunks := make([]string, 0, len(runes)/limit+1)
+	for len(runes) > 0 {
+		n := min(limit, len(runes))
+		chunks = append(chunks, string(runes[:n]))
+		runes = runes[n:]
+	}
+	return chunks
+}
+
+func (a *App) isChatAllowed(chatID int64) bool {
+	if len(a.cfg.AllowChats) == 0 {
+		return true
+	}
+	_, ok := a.cfg.AllowChats[chatID]
+	return ok
+}
+
+func (a *App) isSenderAllowed(user *models.User) bool {
+	if len(a.cfg.AllowFrom) == 0 {
+		return true
+	}
+	if user == nil {
+		return false
+	}
+	id := strings.ToLower(strconv.FormatInt(user.ID, 10))
+	if _, ok := a.cfg.AllowFrom[id]; ok {
+		return true
+	}
+	if user.Username != "" {
+		_, ok := a.cfg.AllowFrom[strings.ToLower(user.Username)]
+		return ok
+	}
+	return false
+}
+
+type telegramSendInput struct {
+	ChatID int64  `json:"chat_id,omitempty"`
+	Text   string `json:"text"`
+}
+
+type telegramSendOutput struct {
+	Sent      bool `json:"sent"`
+	MessageID int  `json:"message_id,omitempty"`
+}
+
+func (a *App) handleTelegramSendTool(ctx context.Context, in telegramSendInput) (telegramSendOutput, error) {
+	chatID := in.ChatID
+	if chatID == 0 {
+		s, ok := blades.FromSessionContext(ctx)
+		if ok {
+			chatID = int64FromAny(s.State()["chat_id"])
+		}
+	}
+	if chatID == 0 {
+		return telegramSendOutput{}, fmt.Errorf("chat_id is required")
+	}
+	if strings.TrimSpace(in.Text) == "" {
+		return telegramSendOutput{}, fmt.Errorf("text is required")
+	}
+	resp, err := a.bot.SendMessage(ctx, &bot.SendMessageParams{
+		ChatID: chatID,
+		Text:   in.Text,
+	})
+	if err != nil {
+		return telegramSendOutput{}, err
+	}
+	return telegramSendOutput{Sent: true, MessageID: resp.ID}, nil
+}
+
+type tapeRecentInput struct {
+	Limit int `json:"limit,omitempty"`
+}
+
+type tapeRecentOutput struct {
+	Records []TapeRecord `json:"records"`
+}
+
+func (a *App) handleTapeRecentTool(ctx context.Context, in tapeRecentInput) (tapeRecentOutput, error) {
+	sessionID, err := sessionIDFromContext(ctx)
+	if err != nil {
+		return tapeRecentOutput{}, err
+	}
+	limit := in.Limit
+	if limit <= 0 {
+		limit = 20
+	}
+	records, err := a.tapes.Recent(sessionID, limit)
+	if err != nil {
+		return tapeRecentOutput{}, err
+	}
+	return tapeRecentOutput{Records: records}, nil
+}
+
+type tapeSearchInput struct {
+	Query string `json:"query"`
+	Limit int    `json:"limit,omitempty"`
+}
+
+type tapeSearchOutput struct {
+	Records []TapeRecord `json:"records"`
+}
+
+func (a *App) handleTapeSearchTool(ctx context.Context, in tapeSearchInput) (tapeSearchOutput, error) {
+	sessionID, err := sessionIDFromContext(ctx)
+	if err != nil {
+		return tapeSearchOutput{}, err
+	}
+	limit := in.Limit
+	if limit <= 0 {
+		limit = 20
+	}
+	records, err := a.tapes.Search(sessionID, in.Query, limit)
+	if err != nil {
+		return tapeSearchOutput{}, err
+	}
+	return tapeSearchOutput{Records: records}, nil
+}
+
+type tapeHandoffInput struct {
+	Summary string `json:"summary"`
+}
+
+type tapeHandoffOutput struct {
+	Stored bool `json:"stored"`
+}
+
+func (a *App) handleTapeHandoffTool(ctx context.Context, in tapeHandoffInput) (tapeHandoffOutput, error) {
+	sessionID, err := sessionIDFromContext(ctx)
+	if err != nil {
+		return tapeHandoffOutput{}, err
+	}
+	summary := strings.TrimSpace(in.Summary)
+	if summary == "" {
+		return tapeHandoffOutput{}, fmt.Errorf("summary is required")
+	}
+	if err := a.tapes.Append(sessionID, "handoff", map[string]any{"summary": summary}); err != nil {
+		return tapeHandoffOutput{}, err
+	}
+	return tapeHandoffOutput{Stored: true}, nil
+}
+
+func sessionIDFromContext(ctx context.Context) (string, error) {
+	session, ok := blades.FromSessionContext(ctx)
+	if !ok || session == nil {
+		return "", fmt.Errorf("session context is missing")
+	}
+	return session.ID(), nil
+}
+
+func int64FromAny(v any) int64 {
+	switch x := v.(type) {
+	case int64:
+		return x
+	case int:
+		return int64(x)
+	case float64:
+		return int64(x)
+	case json.Number:
+		i, _ := x.Int64()
+		return i
+	case string:
+		i, _ := strconv.ParseInt(strings.TrimSpace(x), 10, 64)
+		return i
+	default:
+		return 0
+	}
+}
+
+func parseMessageContent(msg *models.Message) (string, map[string]any) {
+	if msg == nil {
+		return "", nil
+	}
+	switch {
+	case msg.Text != "":
+		return msg.Text, nil
+	case len(msg.Photo) > 0:
+		photo := msg.Photo[len(msg.Photo)-1]
+		text := "[Photo message]"
+		if msg.Caption != "" {
+			text = text + " Caption: " + msg.Caption
+		}
+		return text, map[string]any{
+			"file_id": photo.FileID,
+			"width":   photo.Width,
+			"height":  photo.Height,
+		}
+	case msg.Voice != nil:
+		return fmt.Sprintf("[Voice message: %ds]", msg.Voice.Duration), map[string]any{"file_id": msg.Voice.FileID}
+	case msg.Video != nil:
+		return fmt.Sprintf("[Video: %ds]", msg.Video.Duration), map[string]any{"file_id": msg.Video.FileID}
+	case msg.Document != nil:
+		return "[Document message]", map[string]any{"file_id": msg.Document.FileID, "name": msg.Document.FileName}
+	case msg.Audio != nil:
+		return "[Audio message]", map[string]any{"file_id": msg.Audio.FileID, "title": msg.Audio.Title}
+	case msg.Sticker != nil:
+		return "[Sticker message]", map[string]any{"file_id": msg.Sticker.FileID, "emoji": msg.Sticker.Emoji}
+	default:
+		return "", nil
+	}
+}
+
+func messageType(msg *models.Message) string {
+	if msg == nil {
+		return "unknown"
+	}
+	switch {
+	case msg.Text != "":
+		return "text"
+	case len(msg.Photo) > 0:
+		return "photo"
+	case msg.Voice != nil:
+		return "voice"
+	case msg.Video != nil:
+		return "video"
+	case msg.Document != nil:
+		return "document"
+	case msg.Audio != nil:
+		return "audio"
+	case msg.Sticker != nil:
+		return "sticker"
+	default:
+		return "unknown"
+	}
+}
+
+func senderID(msg *models.Message) string {
+	if msg == nil || msg.From == nil {
+		return ""
+	}
+	return strconv.FormatInt(msg.From.ID, 10)
+}
+
+func senderUsername(msg *models.Message) string {
+	if msg == nil || msg.From == nil {
+		return ""
+	}
+	return msg.From.Username
+}
+
+func senderFullName(msg *models.Message) string {
+	if msg == nil || msg.From == nil {
+		return ""
+	}
+	return strings.TrimSpace(msg.From.FirstName + " " + msg.From.LastName)
+}
+
+func senderIsBot(msg *models.Message) bool {
+	if msg == nil || msg.From == nil {
+		return false
+	}
+	return msg.From.IsBot
+}
