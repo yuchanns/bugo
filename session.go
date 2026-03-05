@@ -71,6 +71,13 @@ func (s *TapeSession) Append(ctx context.Context, message *blades.Message) error
 	})
 }
 
+func (s *TapeSession) Reset() {
+	s.mu.Lock()
+	s.state = blades.State{}
+	s.history = nil
+	s.mu.Unlock()
+}
+
 func cloneMessage(in *blades.Message) *blades.Message {
 	if in == nil {
 		return nil

@@ -65,9 +65,33 @@ If an external skill has the same name as a built-in one, the external skill ove
 - Private chats are handled by default.
 - Group chats are handled only when mention/reply conditions match.
 - Session key format: `telegram:<chat_id>`.
-- Inputs with `,` prefix go to local command channel (for example: `,help`, `,tape recent`, `,tape search ...`).
+- Inputs with `,` prefix go to local command channel.
 - `BUGO_PROACTIVE_RESPONSE=false`: agent text is auto-sent.
 - `BUGO_PROACTIVE_RESPONSE=true`: assistant text is not auto-sent (tool/skill should send explicitly).
+
+Command examples:
+
+```text
+,help
+,tools
+,tool.describe name=fs.read
+,git status
+,fs.read path=README.md
+,fs.write path=notes/todo.txt content="hello"
+,fs.edit path=notes/todo.txt old=hello new=world
+,web.fetch url=https://example.com
+,web.search query=golang
+,tape.handoff name=phase-1 summary="bootstrap done"
+,tape.anchors
+,tape.info
+,tape.search query=error
+,tape.reset archive=true
+,schedule.add cron="*/5 * * * *" message="ping"
+,schedule.list
+,schedule.remove job_id=my-job
+,skills.list
+,quit
+```
 
 ## 5. Tape storage
 

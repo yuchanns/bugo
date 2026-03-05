@@ -30,6 +30,9 @@ type App struct {
 	runner   *blades.Runner
 	bot      *bot.Bot
 	botUser  *models.User
+	skills   []skills.Skill
+	schedule *ScheduleStore
+	workDir  string
 }
 
 func NewApp(cfg Config) (*App, error) {
@@ -48,6 +51,13 @@ func NewApp(cfg Config) (*App, error) {
 		tapes:    tapes,
 		sessions: sessions,
 		inboxes:  newInboxHub(sessions),
+	}
+	app.workDir, _ = os.Getwd()
+	app.schedule, err = NewScheduleStore(func(sessionID string, chatID int64, message string) {
+		app.handleScheduledMessage(sessionID, chatID, message)
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	agent, err := app.buildAgent()
@@ -117,6 +127,7 @@ func (a *App) loadSkills() ([]skills.Skill, error) {
 	}
 
 	merged := mergeSkills(builtin, external)
+	a.skills = merged
 	log.Printf("loaded skills: builtin=%d external=%d merged=%d", len(builtin), len(external), len(merged))
 	return merged, nil
 }
@@ -151,61 +162,84 @@ func mergeSkills(base []skills.Skill, extra []skills.Skill) []skills.Skill {
 }
 
 func (a *App) buildTools() ([]tools.Tool, error) {
-	allTools := make([]tools.Tool, 0, 8)
+	allTools := make([]tools.Tool, 0, 24)
 
-	telegramSend, err := tools.NewFunc(
-		"telegram_send",
-		"Send a message to Telegram. If chat_id is omitted, use current session chat.",
-		a.handleTelegramSendTool,
-	)
-	if err != nil {
+	if err := addFuncTool(&allTools, "telegram_send", "Send a message to Telegram. If chat_id is omitted, use current session chat.", a.handleTelegramSendTool); err != nil {
 		return nil, err
 	}
-	allTools = append(allTools, telegramSend)
-
-	tapeRecent, err := tools.NewFunc(
-		"tape_recent",
-		"Get latest tape records from current session.",
-		a.handleTapeRecentTool,
-	)
-	if err != nil {
+	if err := addFuncTool(&allTools, "tape_recent", "Get latest tape records from current session.", a.handleTapeRecentTool); err != nil {
 		return nil, err
 	}
-	allTools = append(allTools, tapeRecent)
-
-	tapeSearch, err := tools.NewFunc(
-		"tape_search",
-		"Search tape records in current session.",
-		a.handleTapeSearchTool,
-	)
-	if err != nil {
+	if err := addFuncTool(&allTools, "tape_search", "Search tape records in current session.", a.handleTapeSearchTool); err != nil {
 		return nil, err
 	}
-	allTools = append(allTools, tapeSearch)
-
-	tapeHandoff, err := tools.NewFunc(
-		"tape_handoff",
-		"Write a compact handoff summary into tape.",
-		a.handleTapeHandoffTool,
-	)
-	if err != nil {
+	if err := addFuncTool(&allTools, "tape_handoff", "Write a compact handoff summary into tape.", a.handleTapeHandoffTool); err != nil {
 		return nil, err
 	}
-	allTools = append(allTools, tapeHandoff)
+	if err := addFuncTool(&allTools, "bash", "Run shell command in workspace.", a.handleBashTool); err != nil {
+		return nil, err
+	}
+	if err := addFuncTool(&allTools, "fs_read", "Read file content from workspace.", a.handleFSReadTool); err != nil {
+		return nil, err
+	}
+	if err := addFuncTool(&allTools, "fs_write", "Write file content into workspace.", a.handleFSWriteTool); err != nil {
+		return nil, err
+	}
+	if err := addFuncTool(&allTools, "fs_edit", "Replace first matched text in a file.", a.handleFSEditTool); err != nil {
+		return nil, err
+	}
+	if err := addFuncTool(&allTools, "web_fetch", "Fetch URL body with status code.", a.handleWebFetchTool); err != nil {
+		return nil, err
+	}
+	if err := addFuncTool(&allTools, "web_search", "Build a web search URL.", a.handleWebSearchTool); err != nil {
+		return nil, err
+	}
+	if err := addFuncTool(&allTools, "schedule_add", "Add a cron schedule for current session chat.", a.handleScheduleAddTool); err != nil {
+		return nil, err
+	}
+	if err := addFuncTool(&allTools, "schedule_list", "List schedules for current session.", a.handleScheduleListTool); err != nil {
+		return nil, err
+	}
+	if err := addFuncTool(&allTools, "schedule_remove", "Remove one schedule by job_id in current session.", a.handleScheduleRemoveTool); err != nil {
+		return nil, err
+	}
+	if err := addFuncTool(&allTools, "tape_info", "Show tape summary for current session.", a.handleTapeInfoTool); err != nil {
+		return nil, err
+	}
+	if err := addFuncTool(&allTools, "tape_anchors", "List tape anchors for current session.", a.handleTapeAnchorsTool); err != nil {
+		return nil, err
+	}
+	if err := addFuncTool(&allTools, "tape_reset", "Reset current session tape, optionally with archive.", a.handleTapeResetTool); err != nil {
+		return nil, err
+	}
+	if err := addFuncTool(&allTools, "skills_list", "List loaded skills.", a.handleSkillsListTool); err != nil {
+		return nil, err
+	}
+
 	return allTools, nil
 }
 
 func (a *App) systemInstruction() string {
 	return strings.TrimSpace(`
-You are a Telegram coding agent running inside Bugo.
-
-Rules:
-1. Use tools for actions whenever possible.
-2. If you need to actively send a Telegram message, use tool "telegram_send".
-3. You can inspect or summarize long context with tape tools: tape_recent, tape_search, tape_handoff.
-4. Keep replies concise and actionable.
-5. Session metadata is stored in state keys like "chat_id", "session_id", "channel".
-6. If you are in proactive mode, do not assume framework will auto-send your assistant text.
+<runtime_contract>
+1. Use tool calls for all actions (file ops, shell, web, tape, skills, scheduling).
+2. Do not emit comma-prefixed commands in normal flow; use tool calls instead.
+3. If a compatibility fallback is required, runtime can still parse comma commands.
+4. Never emit '<command ...>' blocks yourself; those are runtime-generated.
+5. When enough evidence is collected, return plain natural language answer.
+6. Use '$name' hints to request detail expansion for tools/skills when needed.
+7. The "bash" tool is available in this runtime; do not claim shell access is unavailable when bash can be used.
+8. If the user asks for runtime/system information, first call "bash" with safe read-only commands (for example: uname -a, cat /etc/os-release) and then summarize outputs.
+</runtime_contract>
+<context_contract>
+Excessively long context may cause model call failures. In this case, you SHOULD first use tape_handoff tool to shorten the retrieved history.
+</context_contract>
+<response_instruct>
+You are handling Telegram messages.
+If proactive response mode is enabled, you MUST call "telegram_send" before finishing.
+If proactive response mode is disabled, runtime can auto-send your assistant text.
+Session metadata is in state keys like "channel", "chat_id", "session_id".
+</response_instruct>
 `)
 }
 
@@ -234,6 +268,9 @@ func (a *App) Run(ctx context.Context) error {
 		log.Printf("telegram bot ready: id=%d username=%s", a.botUser.ID, a.botUser.Username)
 	}
 	log.Printf("bugo started: model=%s proactive=%v", a.cfg.Model, a.cfg.ProactiveResponse)
+	if a.schedule != nil {
+		defer a.schedule.Close()
+	}
 	botClient.Start(ctx)
 	return nil
 }
@@ -282,8 +319,8 @@ func (a *App) onUpdate(ctx context.Context, _ *bot.Bot, update *models.Update) {
 		})
 		return
 	}
-	if strings.HasPrefix(content, "/bub ") {
-		content = strings.TrimSpace(strings.TrimPrefix(content, "/bub "))
+	if after, ok := strings.CutPrefix(content, "/bub "); ok {
+		content = strings.TrimSpace(after)
 	}
 	if content == "" {
 		return
@@ -547,60 +584,6 @@ func (a *App) runModelPrompt(session *TapeSession, prompt string, chatID int64, 
 	)
 }
 
-func (a *App) handleCommand(ctx context.Context, inbox *sessionInbox, content string) {
-	cmd := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(content), ","))
-	if cmd == "" {
-		_ = a.sendText(ctx, inbox.chatID, "Empty command. Use ,help.")
-		return
-	}
-
-	fields := strings.Fields(cmd)
-	switch fields[0] {
-	case "help":
-		_ = a.sendText(ctx, inbox.chatID, "Commands:\n,help\n,tape recent [n]\n,tape search <query>")
-	case "tape":
-		a.handleTapeCommand(ctx, inbox, fields[1:])
-	default:
-		_ = a.sendText(ctx, inbox.chatID, "Unknown command: "+fields[0])
-	}
-}
-
-func (a *App) handleTapeCommand(ctx context.Context, inbox *sessionInbox, args []string) {
-	if len(args) == 0 {
-		_ = a.sendText(ctx, inbox.chatID, "Usage: ,tape recent [n] | ,tape search <query>")
-		return
-	}
-	switch args[0] {
-	case "recent":
-		limit := 10
-		if len(args) >= 2 {
-			if v, err := strconv.Atoi(args[1]); err == nil && v > 0 {
-				limit = v
-			}
-		}
-		records, err := a.tapes.Recent(inbox.session.ID(), limit)
-		if err != nil {
-			_ = a.sendText(ctx, inbox.chatID, "Error: "+err.Error())
-			return
-		}
-		a.sendJSON(ctx, inbox.chatID, records)
-	case "search":
-		if len(args) < 2 {
-			_ = a.sendText(ctx, inbox.chatID, "Usage: ,tape search <query>")
-			return
-		}
-		query := strings.Join(args[1:], " ")
-		records, err := a.tapes.Search(inbox.session.ID(), query, 20)
-		if err != nil {
-			_ = a.sendText(ctx, inbox.chatID, "Error: "+err.Error())
-			return
-		}
-		a.sendJSON(ctx, inbox.chatID, records)
-	default:
-		_ = a.sendText(ctx, inbox.chatID, "Unknown tape command: "+args[0])
-	}
-}
-
 func (a *App) startTyping(chatID int64) func() {
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
@@ -619,15 +602,6 @@ func (a *App) startTyping(chatID int64) func() {
 		}
 	}()
 	return cancel
-}
-
-func (a *App) sendJSON(ctx context.Context, chatID int64, value any) {
-	b, err := json.MarshalIndent(value, "", "  ")
-	if err != nil {
-		_ = a.sendText(ctx, chatID, "Error: "+err.Error())
-		return
-	}
-	_ = a.sendText(ctx, chatID, string(b))
 }
 
 func (a *App) sendText(ctx context.Context, chatID int64, text string) error {

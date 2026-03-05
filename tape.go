@@ -23,6 +23,14 @@ type TapeRecord struct {
 	Payload   map[string]any `json:"payload"`
 }
 
+type TapeInfo struct {
+	Name                   string `json:"name"`
+	Entries                int    `json:"entries"`
+	Anchors                int    `json:"anchors"`
+	LastAnchor             string `json:"last_anchor,omitempty"`
+	EntriesSinceLastAnchor int    `json:"entries_since_last_anchor"`
+}
+
 type TapeStore struct {
 	root string
 	mu   sync.Mutex
@@ -106,6 +114,81 @@ func (s *TapeStore) Search(sessionID, query string, limit int) ([]TapeRecord, er
 		matches[i], matches[j] = matches[j], matches[i]
 	}
 	return matches, nil
+}
+
+func (s *TapeStore) Anchors(sessionID string, limit int) ([]TapeRecord, error) {
+	records, err := s.readAll(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	anchors := make([]TapeRecord, 0, len(records))
+	for _, rec := range records {
+		if rec.Kind == "anchor" || rec.Kind == "handoff" {
+			anchors = append(anchors, rec)
+		}
+	}
+	if limit <= 0 || limit >= len(anchors) {
+		return anchors, nil
+	}
+	return anchors[len(anchors)-limit:], nil
+}
+
+func (s *TapeStore) Info(sessionID string) (TapeInfo, error) {
+	records, err := s.readAll(sessionID)
+	if err != nil {
+		return TapeInfo{}, err
+	}
+	info := TapeInfo{
+		Name:    sessionID,
+		Entries: len(records),
+	}
+	lastAnchorIdx := -1
+	for idx, rec := range records {
+		if rec.Kind != "anchor" && rec.Kind != "handoff" {
+			continue
+		}
+		info.Anchors++
+		lastAnchorIdx = idx
+		if name := strings.TrimSpace(fmt.Sprintf("%v", rec.Payload["name"])); name != "" {
+			info.LastAnchor = name
+		}
+	}
+	if lastAnchorIdx >= 0 {
+		info.EntriesSinceLastAnchor = len(records) - lastAnchorIdx - 1
+	}
+	return info, nil
+}
+
+func (s *TapeStore) Reset(sessionID string, archive bool) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	path := s.filePath(sessionID)
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return "tape already empty", nil
+		}
+		return "", err
+	}
+
+	if archive {
+		archiveDir := filepath.Join(s.root, "archive")
+		if err := os.MkdirAll(archiveDir, 0o755); err != nil {
+			return "", err
+		}
+		archived := filepath.Join(
+			archiveDir,
+			fmt.Sprintf("%s-%s.jsonl", filepath.Base(strings.TrimSuffix(path, ".jsonl")), time.Now().UTC().Format("20060102T150405Z")),
+		)
+		if err := os.Rename(path, archived); err != nil {
+			return "", err
+		}
+		return "tape archived and reset", nil
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return "", err
+	}
+	return "tape reset", nil
 }
 
 func (s *TapeStore) readAll(sessionID string) ([]TapeRecord, error) {

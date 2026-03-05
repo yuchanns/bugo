@@ -1,7 +1,6 @@
 ---
 name: telegram
 description: Send Telegram messages with a script fallback when tool calls need custom formatting.
-allowed-tools: "telegram_send,tape_*"
 ---
 
 Use this skill when you need to push a message to Telegram.
