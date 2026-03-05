@@ -602,41 +602,21 @@ func (a *App) executeShell(ctx context.Context, command string) (string, error) 
 }
 
 func (a *App) minimalShellEnv() []string {
-	path := strings.TrimSpace(os.Getenv("PATH"))
-	if path == "" {
-		path = "/usr/bin:/bin"
+	envMap := a.minimalShellEnvMap()
+	env := make([]string, 0, len(envMap))
+	for k, v := range envMap {
+		env = append(env, k+"="+v)
 	}
-	lang := strings.TrimSpace(os.Getenv("LANG"))
-	if lang == "" {
-		lang = "C.UTF-8"
-	}
-	lcAll := strings.TrimSpace(os.Getenv("LC_ALL"))
-	if lcAll == "" {
-		lcAll = lang
-	}
-	home := strings.TrimSpace(os.Getenv("HOME"))
-	if home == "" {
-		home = strings.TrimSpace(a.cfg.HomeDir)
-	}
-	if home == "" {
-		if guessed, err := os.UserHomeDir(); err == nil {
-			home = guessed
-		}
-	}
-	tmpDir := strings.TrimSpace(os.Getenv("TMPDIR"))
-	if tmpDir == "" {
-		tmpDir = "/tmp"
-	}
+	return env
+}
 
-	env := []string{
-		"PATH=" + path,
-		"LANG=" + lang,
-		"LC_ALL=" + lcAll,
-		"HOME=" + home,
-		"TMPDIR=" + tmpDir,
-	}
-	if tz := strings.TrimSpace(os.Getenv("TZ")); tz != "" {
-		env = append(env, "TZ="+tz)
+func (a *App) minimalShellEnvMap() map[string]string {
+	keys := []string{"PATH", "LANG", "LC_ALL", "HOME", "TMPDIR", "TZ"}
+	env := make(map[string]string, len(keys))
+	for _, key := range keys {
+		if value := os.Getenv(key); value != "" {
+			env[key] = value
+		}
 	}
 	return env
 }
@@ -645,6 +625,16 @@ func (a *App) resolveWorkspacePath(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return "", fmt.Errorf("path is required")
+	}
+	allowedEnv := a.minimalShellEnvMap()
+	raw = os.Expand(raw, func(key string) string {
+		return allowedEnv[key]
+	})
+	if raw == "~" {
+		raw = allowedEnv["HOME"]
+	} else if strings.HasPrefix(raw, "~/") {
+		home := strings.TrimSpace(allowedEnv["HOME"])
+		raw = filepath.Join(home, strings.TrimPrefix(raw, "~/"))
 	}
 	base := strings.TrimSpace(a.workDir)
 	if base == "" {
