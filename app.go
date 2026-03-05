@@ -96,6 +96,7 @@ func (a *App) buildAgent() (blades.Agent, error) {
 		blades.WithSkills(skillList...),
 		blades.WithMiddleware(
 			historyMiddleware(a.cfg.HistoryLimit),
+			workspaceAgentsPromptMiddleware(a.workDir),
 			WithPatchedListSkill(),
 		),
 		blades.WithMaxIterations(a.cfg.ModelMaxIterations),
