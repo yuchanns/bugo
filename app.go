@@ -455,7 +455,7 @@ func (a *App) flushInbox(inbox *sessionInbox) {
 	inbox.mu.Unlock()
 
 	cancelTyping := a.startTyping(chatID)
-	response, err := a.runModelPrompt(session, prompt, chatID, !a.cfg.ProactiveResponse)
+	response, err := a.runModelPrompt(session, prompt)
 	cancelTyping()
 
 	if err != nil {
@@ -482,7 +482,7 @@ func (a *App) flushInbox(inbox *sessionInbox) {
 	inbox.mu.Unlock()
 }
 
-func (a *App) runModelPrompt(session *TapeSession, prompt string, chatID int64, streamToTelegram bool) (string, error) {
+func (a *App) runModelPrompt(session *TapeSession, prompt string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), a.cfg.ModelTimeout)
 	defer cancel()
 
@@ -493,49 +493,7 @@ func (a *App) runModelPrompt(session *TapeSession, prompt string, chatID int64, 
 		deltaCount   int
 		finalCount   int
 		toolCount    int
-
-		draftID       string
-		lastDraftSent time.Time
-		draftDisabled bool
 	)
-	sendDraft := func(text string, force bool) {
-		if !streamToTelegram || draftDisabled {
-			return
-		}
-		text = strings.TrimSpace(text)
-		if text == "" {
-			return
-		}
-		if !force && !lastDraftSent.IsZero() && time.Since(lastDraftSent) < 350*time.Millisecond {
-			return
-		}
-		if draftID == "" {
-			draftNum := time.Now().UnixNano()
-			if draftNum < 0 {
-				draftNum = -draftNum
-			}
-			if draftNum == 0 {
-				draftNum = 1
-			}
-			draftID = strconv.FormatInt(draftNum, 10)
-		}
-		ok, err := a.bot.SendMessageDraft(context.Background(), &bot.SendMessageDraftParams{
-			ChatID:  chatID,
-			DraftID: draftID,
-			Text:    text,
-		})
-		if err != nil {
-			draftDisabled = true
-			log.Printf("send draft failed chat_id=%d err=%v", chatID, err)
-			return
-		}
-		if !ok {
-			draftDisabled = true
-			log.Printf("send draft rejected chat_id=%d", chatID)
-			return
-		}
-		lastDraftSent = time.Now()
-	}
 
 	for out, err := range a.runner.RunStream(ctx, blades.UserMessage(prompt), blades.WithSession(session)) {
 		if err != nil {
@@ -561,11 +519,9 @@ func (a *App) runModelPrompt(session *TapeSession, prompt string, chatID int64, 
 		case blades.StatusCompleted:
 			finalText = strings.TrimSpace(text)
 			finalCount++
-			sendDraft(finalText, true)
 		case blades.StatusIncomplete, blades.StatusInProgress:
 			deltaBuilder.WriteString(text)
 			deltaCount++
-			sendDraft(deltaBuilder.String(), false)
 		}
 	}
 	if finalText != "" {
