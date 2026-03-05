@@ -16,7 +16,27 @@ Current scope includes:
 - Append-only tape storage (JSONL)
 - Skills loading (`embed.FS` built-ins + optional external overrides)
 
-## 1. Install
+## 1. Recommended deployment (container, safer)
+
+Container deployment is recommended for production usage.
+It is safer than running directly on the host because process/runtime boundaries are isolated and writable paths are explicit.
+
+```bash
+docker run -d --name bugo \
+  -e BUGO_TELEGRAM_TOKEN="123456:xxxx" \
+  -e BUGO_API_KEY="sk-xxxx" \
+  -e BUGO_MODEL="gpt-4o-mini" \
+  -v "$HOME/.bugo:/data/.bugo" \
+  ghcr.io/yuchanns/bugo:latest
+```
+
+Optional hardening:
+
+- Use a pinned image tag instead of `latest`.
+- Use `--restart unless-stopped`.
+- Mount only the data directory you need.
+
+## 2. Install (local binary)
 
 ```bash
 go install github.com/yuchanns/bugo@latest
@@ -28,7 +48,7 @@ After installation, run:
 bugo
 ```
 
-## 2. Required environment variables
+## 3. Required environment variables
 
 ```bash
 export BUGO_TELEGRAM_TOKEN="123456:xxxx"
@@ -51,9 +71,9 @@ Notes:
 - If `OPENROUTER_API_KEY` is set and `BUGO_API_BASE` is empty, `BUGO_API_BASE` defaults to `https://openrouter.ai/api/v1`.
 - `BUGO_TELEGRAM_ALLOW_CHATS` and `BUGO_TELEGRAM_ALLOW_FROM` accept either JSON array or comma-separated values.
 
-## 3. Skills loading
+## 4. Skills loading
 
-### 3.1 Built-in skills (default)
+### 4.1 Built-in skills (default)
 
 Repository `skills/` are embedded into the binary via `embed.FS` and loaded by default.
 Current built-ins include:
@@ -62,7 +82,7 @@ Current built-ins include:
 - `skill-creator`
 - `skill-installer`
 
-### 3.2 External skills (optional override)
+### 4.2 External skills (optional override)
 
 ```bash
 export BUGO_EXTRA_SKILLS_DIR="/path/to/skills"
@@ -70,7 +90,7 @@ export BUGO_EXTRA_SKILLS_DIR="/path/to/skills"
 
 If an external skill has the same name as a built-in one, the external skill overrides it.
 
-## 4. Telegram behavior
+## 5. Telegram behavior
 
 - Private chats are handled by default.
 - Group chats are handled only when mention/reply conditions match.
@@ -104,7 +124,7 @@ Command examples:
 ,quit
 ```
 
-## 5. Tape storage
+## 6. Tape storage
 
 Default location:
 
@@ -114,7 +134,7 @@ Default location:
 
 Each session maps to one append-only JSONL tape file.
 
-## 6. Local development
+## 7. Local development
 
 ```bash
 go mod tidy
