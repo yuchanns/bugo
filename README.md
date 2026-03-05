@@ -1,5 +1,10 @@
 # bugo
 
+[![Docker](https://img.shields.io/badge/docker-ready-blue.svg)](https://www.docker.com/)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![Image Tags](https://ghcr-badge.yuchanns.xyz/yuchanns/bugo/tags?ignore=latest)](https://ghcr.io/yuchanns/bugo)
+![Image Size](https://ghcr-badge.yuchanns.xyz/yuchanns/bugo/size)
+
 `bugo` is a Telegram agent runtime in Go, inspired by and implemented with reference to:
 
 - https://github.com/bubbuild/bub/
