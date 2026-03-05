@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-kratos/blades"
@@ -33,6 +34,7 @@ type App struct {
 	skills   []skills.Skill
 	schedule *ScheduleStore
 	workDir  string
+	agentMu  sync.RWMutex
 }
 
 func NewApp(cfg Config) (*App, error) {
@@ -60,11 +62,9 @@ func NewApp(cfg Config) (*App, error) {
 		return nil, err
 	}
 
-	agent, err := app.buildAgent()
-	if err != nil {
+	if err := app.reloadAgent(); err != nil {
 		return nil, err
 	}
-	app.runner = blades.NewRunner(agent, blades.WithResumable(true))
 	return app, nil
 }
 
@@ -127,9 +127,40 @@ func (a *App) loadSkills() ([]skills.Skill, error) {
 	}
 
 	merged := mergeSkills(builtin, external)
+	a.agentMu.Lock()
 	a.skills = merged
+	a.agentMu.Unlock()
 	log.Printf("loaded skills: builtin=%d external=%d merged=%d", len(builtin), len(external), len(merged))
 	return merged, nil
+}
+
+func (a *App) reloadAgent() error {
+	agent, err := a.buildAgent()
+	if err != nil {
+		return err
+	}
+	runner := blades.NewRunner(agent, blades.WithResumable(true))
+	a.agentMu.Lock()
+	a.runner = runner
+	a.agentMu.Unlock()
+	return nil
+}
+
+func (a *App) currentRunner() *blades.Runner {
+	a.agentMu.RLock()
+	defer a.agentMu.RUnlock()
+	return a.runner
+}
+
+func (a *App) currentSkills() []skills.Skill {
+	a.agentMu.RLock()
+	defer a.agentMu.RUnlock()
+	if len(a.skills) == 0 {
+		return nil
+	}
+	out := make([]skills.Skill, len(a.skills))
+	copy(out, a.skills)
+	return out
 }
 
 func mergeSkills(base []skills.Skill, extra []skills.Skill) []skills.Skill {
@@ -485,6 +516,10 @@ func (a *App) flushInbox(inbox *sessionInbox) {
 func (a *App) runModelPrompt(session *TapeSession, prompt string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), a.cfg.ModelTimeout)
 	defer cancel()
+	runner := a.currentRunner()
+	if runner == nil {
+		return "", fmt.Errorf("runner is not initialized")
+	}
 
 	var (
 		deltaBuilder strings.Builder
@@ -495,7 +530,7 @@ func (a *App) runModelPrompt(session *TapeSession, prompt string) (string, error
 		toolCount    int
 	)
 
-	for out, err := range a.runner.RunStream(ctx, blades.UserMessage(prompt), blades.WithSession(session)) {
+	for out, err := range runner.RunStream(ctx, blades.UserMessage(prompt), blades.WithSession(session)) {
 		if err != nil {
 			return "", err
 		}

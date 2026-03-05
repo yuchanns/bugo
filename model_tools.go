@@ -239,9 +239,10 @@ type skillsListToolOutput struct {
 }
 
 func (a *App) handleSkillsListTool(_ context.Context, _ skillsListToolInput) (skillsListToolOutput, error) {
-	names := make([]string, 0, len(a.skills))
-	byName := make(map[string]skillItem, len(a.skills))
-	for _, skill := range a.skills {
+	skillList := a.currentSkills()
+	names := make([]string, 0, len(skillList))
+	byName := make(map[string]skillItem, len(skillList))
+	for _, skill := range skillList {
 		if skill == nil {
 			continue
 		}

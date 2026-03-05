@@ -51,6 +51,11 @@ Notes:
 ### 3.1 Built-in skills (default)
 
 Repository `skills/` are embedded into the binary via `embed.FS` and loaded by default.
+Current built-ins include:
+
+- `telegram`
+- `skill-creator`
+- `skill-installer`
 
 ### 3.2 External skills (optional override)
 
@@ -90,6 +95,7 @@ Command examples:
 ,schedule.list
 ,schedule.remove job_id=my-job
 ,skills.list
+,skills.reload
 ,quit
 ```
 

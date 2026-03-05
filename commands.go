@@ -45,14 +45,15 @@ var builtinCommandSpecs = map[string]commandSpec{
 		Description: "Remove a scheduled job",
 		Usage:       ",schedule.remove job_id=my-job",
 	},
-	"tape.handoff": {Name: "tape.handoff", Description: "Create anchor handoff", Usage: ",tape.handoff name=phase-1 summary='Bootstrap complete'"},
-	"tape.anchors": {Name: "tape.anchors", Description: "List tape anchors", Usage: ",tape.anchors"},
-	"tape.info":    {Name: "tape.info", Description: "Show tape summary", Usage: ",tape.info"},
-	"tape.search":  {Name: "tape.search", Description: "Search tape entries", Usage: ",tape.search query=error"},
-	"tape.recent":  {Name: "tape.recent", Description: "Show recent tape entries (compat)", Usage: ",tape.recent limit=10"},
-	"tape.reset":   {Name: "tape.reset", Description: "Reset tape", Usage: ",tape.reset archive=true"},
-	"skills.list":  {Name: "skills.list", Description: "List discovered skills", Usage: ",skills.list"},
-	"quit":         {Name: "quit", Description: "Exit program (CLI semantics)", Usage: ",quit"},
+	"tape.handoff":  {Name: "tape.handoff", Description: "Create anchor handoff", Usage: ",tape.handoff name=phase-1 summary='Bootstrap complete'"},
+	"tape.anchors":  {Name: "tape.anchors", Description: "List tape anchors", Usage: ",tape.anchors"},
+	"tape.info":     {Name: "tape.info", Description: "Show tape summary", Usage: ",tape.info"},
+	"tape.search":   {Name: "tape.search", Description: "Search tape entries", Usage: ",tape.search query=error"},
+	"tape.recent":   {Name: "tape.recent", Description: "Show recent tape entries (compat)", Usage: ",tape.recent limit=10"},
+	"tape.reset":    {Name: "tape.reset", Description: "Reset tape", Usage: ",tape.reset archive=true"},
+	"skills.list":   {Name: "skills.list", Description: "List discovered skills", Usage: ",skills.list"},
+	"skills.reload": {Name: "skills.reload", Description: "Reload skills and rebuild runner", Usage: ",skills.reload"},
+	"quit":          {Name: "quit", Description: "Exit program (CLI semantics)", Usage: ",quit"},
 }
 
 var commandAliases = map[string]string{
@@ -162,6 +163,8 @@ func (a *App) executeCommand(ctx context.Context, inbox *sessionInbox, content s
 		return a.execScheduleRemove(inbox, parsed)
 	case "skills.list":
 		return a.execSkillsList(), nil
+	case "skills.reload":
+		return a.execSkillsReload()
 	case "fs.read":
 		return a.execFSRead(parsed)
 	case "fs.write":
@@ -180,25 +183,40 @@ func (a *App) executeCommand(ctx context.Context, inbox *sessionInbox, content s
 }
 
 func (a *App) commandHelpText() string {
-	return strings.Join([]string{
+	names := make([]string, 0, len(builtinCommandSpecs))
+	for name := range builtinCommandSpecs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	lines := []string{
 		"Commands use ',' at line start.",
-		"Known names map to internal tools; other commands run through bash.",
-		"Examples:",
-		"  ,help",
-		"  ,git status",
-		"  , ls -la",
-		"  ,tools",
-		"  ,tool.describe name=fs.read",
-		"  ,tape.handoff name=phase-1 summary='Bootstrap complete'",
-		"  ,tape.anchors",
-		"  ,tape.info",
-		"  ,tape.search query=error",
-		"  ,schedule.add cron='*/5 * * * *' message='echo hello'",
-		"  ,schedule.list",
-		"  ,schedule.remove job_id=my-job",
-		"  ,skills.list",
-		"  ,quit",
-	}, "\n")
+		"Known names map to internal commands; other comma-prefixed lines run through bash.",
+		"Available commands:",
+	}
+	for _, name := range names {
+		spec := builtinCommandSpecs[name]
+		usage := strings.TrimSpace(spec.Usage)
+		if usage == "" {
+			usage = "," + name
+		}
+		lines = append(lines, fmt.Sprintf("  %s  # %s", usage, spec.Description))
+	}
+	if len(commandAliases) > 0 {
+		lines = append(lines, "Aliases:")
+		aliasNames := make([]string, 0, len(commandAliases))
+		for name := range commandAliases {
+			aliasNames = append(aliasNames, name)
+		}
+		sort.Strings(aliasNames)
+		for _, alias := range aliasNames {
+			lines = append(lines, fmt.Sprintf("  ,%s -> ,%s", alias, commandAliases[alias]))
+		}
+	}
+	lines = append(lines, "Shell examples:")
+	lines = append(lines, "  ,git status")
+	lines = append(lines, "  , ls -la")
+	return strings.Join(lines, "\n")
 }
 
 func (a *App) listToolsText() string {
@@ -406,12 +424,13 @@ func (a *App) execScheduleRemove(inbox *sessionInbox, parsed parsedCommandArgs) 
 }
 
 func (a *App) execSkillsList() string {
-	if len(a.skills) == 0 {
+	skillList := a.currentSkills()
+	if len(skillList) == 0 {
 		return "(no skills)"
 	}
-	names := make([]string, 0, len(a.skills))
-	skillsByName := make(map[string]string, len(a.skills))
-	for _, skill := range a.skills {
+	names := make([]string, 0, len(skillList))
+	skillsByName := make(map[string]string, len(skillList))
+	for _, skill := range skillList {
 		if skill == nil {
 			continue
 		}
@@ -428,6 +447,13 @@ func (a *App) execSkillsList() string {
 		rows = append(rows, fmt.Sprintf("%s: %s", name, skillsByName[name]))
 	}
 	return strings.Join(rows, "\n")
+}
+
+func (a *App) execSkillsReload() (string, error) {
+	if err := a.reloadAgent(); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("skills reloaded: %d", len(a.currentSkills())), nil
 }
 
 func (a *App) execFSRead(parsed parsedCommandArgs) (string, error) {
