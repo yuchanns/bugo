@@ -1,0 +1,10 @@
+.git
+.gitignore
+.github
+.agent
+.agents
+.playwright
+.playwright-cli
+vendor
+*.log
+tmp
