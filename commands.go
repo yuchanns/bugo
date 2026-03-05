@@ -556,7 +556,8 @@ func (a *App) execBash(ctx context.Context, parsed parsedCommandArgs) (string, e
 }
 
 func (a *App) executeShell(ctx context.Context, command string) (string, error) {
-	cmd := exec.CommandContext(ctx, "bash", "-lc", command)
+	cmd := exec.CommandContext(ctx, "bash", "--noprofile", "--norc", "-c", command)
+	cmd.Env = a.minimalShellEnv()
 	if strings.TrimSpace(a.workDir) != "" {
 		cmd.Dir = a.workDir
 	}
@@ -572,6 +573,46 @@ func (a *App) executeShell(ctx context.Context, command string) (string, error) 
 		return "(no output)", nil
 	}
 	return text, nil
+}
+
+func (a *App) minimalShellEnv() []string {
+	path := strings.TrimSpace(os.Getenv("PATH"))
+	if path == "" {
+		path = "/usr/bin:/bin"
+	}
+	lang := strings.TrimSpace(os.Getenv("LANG"))
+	if lang == "" {
+		lang = "C.UTF-8"
+	}
+	lcAll := strings.TrimSpace(os.Getenv("LC_ALL"))
+	if lcAll == "" {
+		lcAll = lang
+	}
+	home := strings.TrimSpace(os.Getenv("HOME"))
+	if home == "" {
+		home = strings.TrimSpace(a.cfg.HomeDir)
+	}
+	if home == "" {
+		if guessed, err := os.UserHomeDir(); err == nil {
+			home = guessed
+		}
+	}
+	tmpDir := strings.TrimSpace(os.Getenv("TMPDIR"))
+	if tmpDir == "" {
+		tmpDir = "/tmp"
+	}
+
+	env := []string{
+		"PATH=" + path,
+		"LANG=" + lang,
+		"LC_ALL=" + lcAll,
+		"HOME=" + home,
+		"TMPDIR=" + tmpDir,
+	}
+	if tz := strings.TrimSpace(os.Getenv("TZ")); tz != "" {
+		env = append(env, "TZ="+tz)
+	}
+	return env
 }
 
 func (a *App) resolveWorkspacePath(raw string) (string, error) {
