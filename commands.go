@@ -368,6 +368,7 @@ func (a *App) execTapeReset(inbox *sessionInbox, parsed parsedCommandArgs) (stri
 		return "", err
 	}
 	inbox.session.Reset()
+	inbox.resetRuntime()
 	return result, nil
 }
 

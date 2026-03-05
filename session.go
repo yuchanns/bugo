@@ -156,3 +156,26 @@ func (h *inboxHub) Get(sessionID string, chatID int64) *sessionInbox {
 	h.items[sessionID] = created
 	return created
 }
+
+func (h *inboxHub) resetSession(sessionID string) bool {
+	h.mu.Lock()
+	inbox, ok := h.items[sessionID]
+	h.mu.Unlock()
+	if !ok || inbox == nil {
+		return false
+	}
+	return inbox.resetRuntime()
+}
+
+func (inbox *sessionInbox) resetRuntime() bool {
+	inbox.mu.Lock()
+	defer inbox.mu.Unlock()
+
+	if inbox.timer != nil {
+		inbox.timer.Stop()
+		inbox.timer = nil
+	}
+	inbox.pending = nil
+	inbox.lastMention = time.Time{}
+	return false
+}

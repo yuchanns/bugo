@@ -222,6 +222,7 @@ func (a *App) handleTapeResetTool(ctx context.Context, in tapeResetToolInput) (t
 			ts.Reset()
 		}
 	}
+	a.inboxes.resetSession(sessionID)
 	return tapeResetToolOutput{Result: result}, nil
 }
 
