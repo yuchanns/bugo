@@ -33,6 +33,7 @@ type Config struct {
 	WorkDir            string
 	HomeDir            string
 	ExtraSkillsDir     string
+	BashAllowEnv       []string
 	HistoryMaxTokens   int
 }
 
@@ -54,6 +55,11 @@ func LoadConfig() (Config, error) {
 		ExtraSkillsDir:     env("BUGO_EXTRA_SKILLS_DIR"),
 		HistoryMaxTokens:   intEnv("BUGO_HISTORY_MAX_TOKENS", 24000),
 	}
+	bashAllowEnv, err := parseEnvNameList(env("BUGO_BASH_ALLOW_ENV"))
+	if err != nil {
+		return Config{}, fmt.Errorf("parse bash allow env: %w", err)
+	}
+	cfg.BashAllowEnv = bashAllowEnv
 
 	cfg.APIKey = firstNonEmpty(env("BUGO_API_KEY"), env("OPENROUTER_API_KEY"), env("OPENAI_API_KEY"))
 	cfg.APIBase = env("BUGO_API_BASE")
@@ -154,6 +160,26 @@ func parseInt64Set(raw string) (map[int64]struct{}, error) {
 			return nil, fmt.Errorf("invalid int64 value %q", item)
 		}
 		out[id] = struct{}{}
+	}
+	return out, nil
+}
+
+func parseEnvNameList(raw string) ([]string, error) {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, 8)
+	for _, item := range splitAnyList(raw) {
+		name := strings.TrimSpace(item)
+		if name == "" {
+			continue
+		}
+		if strings.Contains(name, "=") {
+			return nil, fmt.Errorf("invalid env name %q", name)
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
 	}
 	return out, nil
 }

@@ -63,6 +63,7 @@ export BUGO_API_BASE="https://openrouter.ai/api/v1"
 export BUGO_PROACTIVE_RESPONSE=false
 export BUGO_TELEGRAM_ALLOW_CHATS='["123456789"]'
 export BUGO_TELEGRAM_ALLOW_FROM='["123456789","your_username"]'
+export BUGO_BASH_ALLOW_ENV='["SSH_AUTH_SOCK","HTTP_PROXY","HTTPS_PROXY","NO_PROXY"]'
 export BUGO_WORKDIR="/path/to/workspace"
 export BUGO_HOME="~/.bugo"
 export BUGO_HISTORY_MAX_TOKENS=24000
@@ -72,6 +73,7 @@ Notes:
 
 - If `OPENROUTER_API_KEY` is set and `BUGO_API_BASE` is empty, `BUGO_API_BASE` defaults to `https://openrouter.ai/api/v1`.
 - `BUGO_TELEGRAM_ALLOW_CHATS` and `BUGO_TELEGRAM_ALLOW_FROM` accept either JSON array or comma-separated values.
+- `BUGO_BASH_ALLOW_ENV` adds env names to the shell-tool inherit whitelist (JSON array or comma-separated).
 - `BUGO_WORKDIR` defaults to the current working directory at startup.
 - History is selected by context token budget via `BUGO_HISTORY_MAX_TOKENS`.
 
@@ -82,7 +84,6 @@ Notes:
 Repository `skills/` are embedded into the binary via `embed.FS` and loaded by default.
 Current built-ins include:
 
-- `telegram`
 - `skill-creator`
 - `skill-installer`
 

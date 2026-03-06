@@ -613,9 +613,19 @@ func (a *App) minimalShellEnv() []string {
 
 func (a *App) minimalShellEnvMap() map[string]string {
 	keys := []string{"PATH", "LANG", "LC_ALL", "HOME", "TMPDIR", "TZ"}
+	if len(a.cfg.BashAllowEnv) > 0 {
+		keys = append(keys, a.cfg.BashAllowEnv...)
+	}
 	env := make(map[string]string, len(keys))
 	for _, key := range keys {
-		if value := os.Getenv(key); value != "" {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		if _, exists := env[key]; exists {
+			continue
+		}
+		if value, ok := os.LookupEnv(key); ok {
 			env[key] = value
 		}
 	}
