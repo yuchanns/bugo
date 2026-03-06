@@ -37,8 +37,8 @@ func tapeContextMiddleware(tapes *TapeStore, maxTokens int) blades.Middleware {
 	}
 }
 
-// WithPatchedListSkill patches list_skills input schema for gateways that reject empty object properties.
-func WithPatchedListSkill() blades.Middleware {
+// patchedListSkill patches list_skills input schema for gateways that reject empty object properties.
+func patchedListSkill() blades.Middleware {
 	return func(next blades.Handler) blades.Handler {
 		return blades.HandleFunc(func(ctx context.Context, invocation *blades.Invocation) blades.Generator[*blades.Message, error] {
 			if invocation == nil || len(invocation.Tools) == 0 {

@@ -41,6 +41,10 @@ func NewApp(cfg Config) (*App, error) {
 	if err := os.MkdirAll(cfg.HomeDir, 0o755); err != nil {
 		return nil, err
 	}
+	workDir, err := resolveWorkDir(cfg.WorkDir)
+	if err != nil {
+		return nil, err
+	}
 
 	tapes, err := NewTapeStore(filepath.Join(cfg.HomeDir, "tapes"), cfg.Model)
 	if err != nil {
@@ -53,8 +57,8 @@ func NewApp(cfg Config) (*App, error) {
 		tapes:    tapes,
 		sessions: sessions,
 		inboxes:  newInboxHub(sessions),
+		workDir:  workDir,
 	}
-	app.workDir, _ = os.Getwd()
 	app.schedule, err = NewScheduleStore(func(sessionID string, chatID int64, message string) {
 		app.handleScheduledMessage(sessionID, chatID, message)
 	})
@@ -66,6 +70,30 @@ func NewApp(cfg Config) (*App, error) {
 		return nil, err
 	}
 	return app, nil
+}
+
+func resolveWorkDir(raw string) (string, error) {
+	base, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	target := strings.TrimSpace(raw)
+	if target == "" {
+		return base, nil
+	}
+	target = resolveHomeDir(target)
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(base, target)
+	}
+	target = filepath.Clean(target)
+	info, err := os.Stat(target)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("workdir is not a directory: %s", target)
+	}
+	return target, nil
 }
 
 func (a *App) buildAgent() (blades.Agent, error) {
@@ -97,7 +125,7 @@ func (a *App) buildAgent() (blades.Agent, error) {
 		blades.WithMiddleware(
 			tapeContextMiddleware(a.tapes, a.cfg.HistoryMaxTokens),
 			workspaceAgentsPromptMiddleware(a.workDir),
-			WithPatchedListSkill(),
+			patchedListSkill(),
 		),
 		blades.WithMaxIterations(a.cfg.ModelMaxIterations),
 	)
@@ -351,7 +379,7 @@ func (a *App) onUpdate(ctx context.Context, _ *bot.Bot, update *models.Update) {
 		})
 		return
 	}
-	if after, ok := strings.CutPrefix(content, "/bub "); ok {
+	if after, ok := strings.CutPrefix(content, "/bugo "); ok {
 		content = strings.TrimSpace(after)
 	}
 	if content == "" {
@@ -424,7 +452,7 @@ func (a *App) isMentioned(msg *models.Message, content string) bool {
 			}
 		}
 		lower := strings.ToLower(content)
-		if strings.Contains(lower, "bub") {
+		if strings.Contains(lower, "bugo") {
 			return true
 		}
 		if a.botUser != nil && a.botUser.Username != "" {

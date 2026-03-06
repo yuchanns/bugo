@@ -1,6 +1,6 @@
 ---
 name: skill-installer
-description: Install Bub skills into the shared skills directory from a curated list or a GitHub repo path. Use when a user asks to list installable skills, install a curated skill, or install a skill from another repo (including private repos).
+description: Install Bugo skills into the shared skills directory from a curated list or a GitHub repo path. Use when a user asks to list installable skills, install a curated skill, or install a skill from another repo (including private repos).
 metadata:
   short-description: Install curated skills from openai/skills or other repos
 ---
@@ -34,7 +34,7 @@ Skills from {repo}:
 Which ones would you like installed?
 """
 
-After installing a skill, tell the user: "Restart Bub to pick up new skills."
+After installing a skill, tell the user: "Restart Bugo to pick up new skills."
 
 ## Commands
 
@@ -53,7 +53,7 @@ All of these commands use network.
 
 - `npx skills add` handles discovery and installation directly.
 - Use project scope by default; use `--global` for cross-workspace availability.
-- Always pass `--agent antigravity` so install location matches Bub discovery (`.agent/skills`).
+- Always pass `--agent antigravity` so install location matches Bugo discovery (`.agent/skills`).
 - Prefer non-interactive usage with `--yes` when you already know the target skill.
 
 ## Notes

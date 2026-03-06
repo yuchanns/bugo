@@ -30,6 +30,7 @@ type Config struct {
 	MaxOutputTokens    int
 	APIKey             string
 	APIBase            string
+	WorkDir            string
 	HomeDir            string
 	ExtraSkillsDir     string
 	HistoryMaxTokens   int
@@ -48,6 +49,7 @@ func LoadConfig() (Config, error) {
 		ModelMaxIterations: intEnv("BUGO_MAX_ITERATIONS", 20),
 		ModelTimeout:       time.Duration(intEnv("BUGO_MODEL_TIMEOUT_SECONDS", 90)) * time.Second,
 		MaxOutputTokens:    intEnv("BUGO_MAX_OUTPUT_TOKENS", 1024),
+		WorkDir:            env("BUGO_WORKDIR"),
 		HomeDir:            resolveHomeDir(firstNonEmpty(env("BUGO_HOME"), "~/.bugo")),
 		ExtraSkillsDir:     env("BUGO_EXTRA_SKILLS_DIR"),
 		HistoryMaxTokens:   intEnv("BUGO_HISTORY_MAX_TOKENS", 24000),
