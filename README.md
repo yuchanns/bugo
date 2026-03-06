@@ -87,11 +87,11 @@ Current built-ins include:
 - `skill-creator`
 - `skill-installer`
 
-### 4.2 External skills (optional override)
+### 4.2 External skills
 
-```bash
-export BUGO_EXTRA_SKILLS_DIR="/path/to/skills"
-```
+Bugo loads external skills from:
+
+- `$BUGO_WORKDIR/.agent/skills` (or startup CWD when `BUGO_WORKDIR` is not set)
 
 If an external skill has the same name as a built-in one, the external skill overrides it.
 

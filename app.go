@@ -96,6 +96,18 @@ func resolveWorkDir(raw string) (string, error) {
 	return target, nil
 }
 
+func resolveExternalSkillsDir(workDir string) (string, error) {
+	base := strings.TrimSpace(workDir)
+	if base == "" {
+		var err error
+		base, err = os.Getwd()
+		if err != nil {
+			return "", err
+		}
+	}
+	return filepath.Clean(filepath.Join(base, ".agent", "skills")), nil
+}
+
 func (a *App) buildAgent() (blades.Agent, error) {
 	modelConfig := openai.Config{
 		BaseURL:         a.cfg.APIBase,
@@ -138,20 +150,22 @@ func (a *App) loadSkills() ([]skills.Skill, error) {
 	}
 
 	var external []skills.Skill
-	if dir := strings.TrimSpace(a.cfg.ExtraSkillsDir); dir != "" {
-		info, err := os.Stat(dir)
+	externalDir, err := resolveExternalSkillsDir(a.workDir)
+	if err != nil {
+		return nil, err
+	}
+	info, err := os.Stat(externalDir)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return nil, err
+		}
+	} else {
+		if !info.IsDir() {
+			return nil, fmt.Errorf("extra skills path is not a directory: %s", externalDir)
+		}
+		external, err = skills.NewFromDir(externalDir)
 		if err != nil {
-			if !os.IsNotExist(err) {
-				return nil, err
-			}
-		} else {
-			if !info.IsDir() {
-				return nil, fmt.Errorf("extra skills path is not a directory: %s", dir)
-			}
-			external, err = skills.NewFromDir(dir)
-			if err != nil {
-				return nil, err
-			}
+			return nil, err
 		}
 	}
 

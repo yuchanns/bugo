@@ -30,7 +30,6 @@ type Config struct {
 	APIBase            string
 	WorkDir            string
 	HomeDir            string
-	ExtraSkillsDir     string
 	BashAllowEnv       []string
 	HistoryMaxTokens   int
 }
@@ -49,7 +48,6 @@ func LoadConfig() (Config, error) {
 		MaxOutputTokens:    intEnv("BUGO_MAX_OUTPUT_TOKENS", 1024),
 		WorkDir:            env("BUGO_WORKDIR"),
 		HomeDir:            resolveHomeDir(firstNonEmpty(env("BUGO_HOME"), "~/.bugo")),
-		ExtraSkillsDir:     env("BUGO_EXTRA_SKILLS_DIR"),
 		HistoryMaxTokens:   intEnv("BUGO_HISTORY_MAX_TOKENS", 24000),
 	}
 	bashAllowEnv, err := parseEnvNameList(env("BUGO_BASH_ALLOW_ENV"))
