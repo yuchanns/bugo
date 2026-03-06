@@ -10,7 +10,8 @@ import (
 )
 
 const (
-	defaultModel = "gpt-4o-mini"
+	defaultModel         = "gpt-4o-mini"
+	defaultMaxIterations = int(^uint(0) >> 1)
 )
 
 type Config struct {
@@ -44,7 +45,7 @@ func LoadConfig() (Config, error) {
 		MessageDelay:       intEnv("BUGO_MESSAGE_DELAY_SECONDS", 10),
 		ActiveWindow:       intEnv("BUGO_ACTIVE_WINDOW_SECONDS", 60),
 		Model:              firstNonEmpty(env("BUGO_MODEL"), defaultModel),
-		ModelMaxIterations: intEnv("BUGO_MAX_ITERATIONS", 20),
+		ModelMaxIterations: intEnv("BUGO_MAX_ITERATIONS", defaultMaxIterations),
 		MaxOutputTokens:    intEnv("BUGO_MAX_OUTPUT_TOKENS", 1024),
 		WorkDir:            env("BUGO_WORKDIR"),
 		HomeDir:            resolveHomeDir(firstNonEmpty(env("BUGO_HOME"), "~/.bugo")),
