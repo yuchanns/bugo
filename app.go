@@ -553,22 +553,14 @@ func (a *App) runModelPrompt(session *TapeSession, prompt string) (string, error
 	var (
 		deltaBuilder strings.Builder
 		finalText    string
-		eventCount   int
-		deltaCount   int
-		finalCount   int
-		toolCount    int
 	)
 
 	for out, err := range runner.RunStream(ctx, blades.UserMessage(prompt), blades.WithSession(session)) {
 		if err != nil {
 			return "", err
 		}
-		eventCount++
 		if out == nil {
 			continue
-		}
-		if out.Role == blades.RoleTool {
-			toolCount++
 		}
 		if out.Role != blades.RoleAssistant {
 			continue
@@ -582,10 +574,8 @@ func (a *App) runModelPrompt(session *TapeSession, prompt string) (string, error
 		switch out.Status {
 		case blades.StatusCompleted:
 			finalText = strings.TrimSpace(text)
-			finalCount++
 		case blades.StatusIncomplete, blades.StatusInProgress:
 			deltaBuilder.WriteString(text)
-			deltaCount++
 		}
 	}
 	if finalText != "" {
@@ -595,13 +585,7 @@ func (a *App) runModelPrompt(session *TapeSession, prompt string) (string, error
 	if streamText != "" {
 		return streamText, nil
 	}
-	return "", fmt.Errorf(
-		"empty model output: events=%d assistant_deltas=%d assistant_finals=%d tool_events=%d",
-		eventCount,
-		deltaCount,
-		finalCount,
-		toolCount,
-	)
+	return "", nil
 }
 
 func (a *App) startTyping(chatID int64) func() {
