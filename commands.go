@@ -592,9 +592,9 @@ func (a *App) executeShell(ctx context.Context, command string) (string, error) 
 	text := strings.TrimSpace(string(out))
 	if err != nil {
 		if text == "" {
-			return "", fmt.Errorf("%w", err)
+			return err.Error(), nil
 		}
-		return "", fmt.Errorf("%w\n%s", err, text)
+		return err.Error() + "\n" + text, nil
 	}
 	if text == "" {
 		return "(no output)", nil
