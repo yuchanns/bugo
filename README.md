@@ -91,7 +91,7 @@ Current built-ins include:
 
 Bugo loads external skills from:
 
-- `$BUGO_WORKDIR/.agent/skills` (or startup CWD when `BUGO_WORKDIR` is not set)
+- `$BUGO_WORKDIR/.agents/skills` (or startup CWD when `BUGO_WORKDIR` is not set)
 
 If an external skill has the same name as a built-in one, the external skill overrides it.
 

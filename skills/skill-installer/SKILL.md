@@ -18,8 +18,8 @@ Use `npx skills` based on the task:
 
 Use one of these roots for installed skills:
 
-1. Project-local: `$workspace/.agent/skills/<skill-name>`
-2. Global: `~/.agent/skills/<skill-name>` (shared across workspaces)
+1. Project-local: `$workspace/.agents/skills/<skill-name>`
+2. Global: `~/.agents/skills/<skill-name>` (shared across workspaces)
 
 Prefer project-local for repo-specific workflows. Use global only when the user asks for cross-workspace availability.
 
@@ -53,7 +53,7 @@ All of these commands use network.
 
 - `npx skills add` handles discovery and installation directly.
 - Use project scope by default; use `--global` for cross-workspace availability.
-- Always pass `--agent antigravity` so install location matches Bugo discovery (`.agent/skills`).
+- Always pass `--agent antigravity` so install location matches Bugo discovery (`.agents/skills`).
 - Prefer non-interactive usage with `--yes` when you already know the target skill.
 
 ## Notes

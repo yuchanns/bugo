@@ -105,7 +105,7 @@ func resolveExternalSkillsDir(workDir string) (string, error) {
 			return "", err
 		}
 	}
-	return filepath.Clean(filepath.Join(base, ".agent", "skills")), nil
+	return filepath.Clean(filepath.Join(base, ".agents", "skills")), nil
 }
 
 func (a *App) buildAgent() (blades.Agent, error) {
