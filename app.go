@@ -125,7 +125,7 @@ func (a *App) buildAgent() (blades.Agent, error) {
 		blades.WithMiddleware(
 			tapeContextMiddleware(a.tapes, a.cfg.HistoryMaxTokens),
 			workspaceAgentsPromptMiddleware(a.workDir),
-			patchedListSkill(),
+			patchToolSchemas(),
 		),
 		blades.WithMaxIterations(a.cfg.ModelMaxIterations),
 	)
