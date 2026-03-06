@@ -2,10 +2,13 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,8 +39,19 @@ type TapeInfo struct {
 type TapeStore struct {
 	root      string
 	mu        sync.Mutex
+	files     map[string]*tapeFile
 	tokenizer tokenizer.Codec
 	tokenMu   sync.Mutex
+}
+
+type tapeFile struct {
+	records []TapeRecord
+	offset  int64
+}
+
+func (f *tapeFile) reset() {
+	f.records = nil
+	f.offset = 0
 }
 
 func NewTapeStore(root, model string) (*TapeStore, error) {
@@ -53,6 +67,7 @@ func NewTapeStore(root, model string) (*TapeStore, error) {
 	}
 	return &TapeStore{
 		root:      root,
+		files:     map[string]*tapeFile{},
 		tokenizer: enc,
 	}, nil
 }
@@ -245,11 +260,13 @@ func (s *TapeStore) Reset(sessionID string, archive bool) (string, error) {
 		if err := os.Rename(path, archived); err != nil {
 			return "", err
 		}
+		s.tapeFileLocked(sessionID).reset()
 		return "tape archived and reset", nil
 	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return "", err
 	}
+	s.tapeFileLocked(sessionID).reset()
 	return "tape reset", nil
 }
 
@@ -257,33 +274,68 @@ func (s *TapeStore) readAll(sessionID string) ([]TapeRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	file := s.tapeFileLocked(sessionID)
 	path := s.filePath(sessionID)
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			file.reset()
+			return nil, nil
+		}
+		return nil, err
+	}
+	if info.Size() < file.offset {
+		// The tape file was truncated/replaced; cached entries are stale.
+		file.reset()
+	}
+
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
+			file.reset()
 			return nil, nil
 		}
 		return nil, err
 	}
 	defer f.Close()
 
-	scanner := bufio.NewScanner(f)
-	out := make([]TapeRecord, 0, 128)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-		var rec TapeRecord
-		if err := json.Unmarshal([]byte(line), &rec); err != nil {
-			continue
-		}
-		out = append(out, rec)
-	}
-	if err := scanner.Err(); err != nil {
+	if _, err := f.Seek(file.offset, io.SeekStart); err != nil {
 		return nil, err
 	}
+
+	reader := bufio.NewReader(f)
+	for {
+		rawLine, readErr := reader.ReadBytes('\n')
+		if len(rawLine) > 0 {
+			file.offset += int64(len(rawLine))
+			line := bytes.TrimSpace(rawLine)
+			if len(line) > 0 {
+				var rec TapeRecord
+				if err := json.Unmarshal(line, &rec); err == nil {
+					file.records = append(file.records, rec)
+				}
+			}
+		}
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+		if readErr != nil {
+			return nil, readErr
+		}
+	}
+
+	out := make([]TapeRecord, len(file.records))
+	copy(out, file.records)
 	return out, nil
+}
+
+func (s *TapeStore) tapeFileLocked(sessionID string) *tapeFile {
+	if f, ok := s.files[sessionID]; ok {
+		return f
+	}
+	f := &tapeFile{}
+	s.files[sessionID] = f
+	return f
 }
 
 func (s *TapeStore) filePath(sessionID string) string {
