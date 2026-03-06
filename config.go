@@ -32,7 +32,7 @@ type Config struct {
 	APIBase            string
 	HomeDir            string
 	ExtraSkillsDir     string
-	HistoryLimit       int
+	HistoryMaxTokens   int
 }
 
 func LoadConfig() (Config, error) {
@@ -50,7 +50,7 @@ func LoadConfig() (Config, error) {
 		MaxOutputTokens:    intEnv("BUGO_MAX_OUTPUT_TOKENS", 1024),
 		HomeDir:            resolveHomeDir(firstNonEmpty(env("BUGO_HOME"), "~/.bugo")),
 		ExtraSkillsDir:     env("BUGO_EXTRA_SKILLS_DIR"),
-		HistoryLimit:       intEnv("BUGO_HISTORY_LIMIT", 80),
+		HistoryMaxTokens:   intEnv("BUGO_HISTORY_MAX_TOKENS", 24000),
 	}
 
 	cfg.APIKey = firstNonEmpty(env("BUGO_API_KEY"), env("OPENROUTER_API_KEY"), env("OPENAI_API_KEY"))

@@ -64,12 +64,14 @@ export BUGO_PROACTIVE_RESPONSE=false
 export BUGO_TELEGRAM_ALLOW_CHATS='["123456789"]'
 export BUGO_TELEGRAM_ALLOW_FROM='["123456789","your_username"]'
 export BUGO_HOME="~/.bugo"
+export BUGO_HISTORY_MAX_TOKENS=24000
 ```
 
 Notes:
 
 - If `OPENROUTER_API_KEY` is set and `BUGO_API_BASE` is empty, `BUGO_API_BASE` defaults to `https://openrouter.ai/api/v1`.
 - `BUGO_TELEGRAM_ALLOW_CHATS` and `BUGO_TELEGRAM_ALLOW_FROM` accept either JSON array or comma-separated values.
+- History is selected by context token budget via `BUGO_HISTORY_MAX_TOKENS`.
 
 ## 4. Skills loading
 

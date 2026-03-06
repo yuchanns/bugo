@@ -2,8 +2,8 @@ package main
 
 import (
 	"context"
+	"log"
 	"maps"
-	"slices"
 	"sync"
 	"time"
 
@@ -11,11 +11,10 @@ import (
 )
 
 type TapeSession struct {
-	id      string
-	state   blades.State
-	history []*blades.Message
-	tapes   *TapeStore
-	mu      sync.RWMutex
+	id    string
+	state blades.State
+	tapes *TapeStore
+	mu    sync.RWMutex
 }
 
 func NewTapeSession(id string, tapes *TapeStore) *TapeSession {
@@ -47,46 +46,23 @@ func (s *TapeSession) SetState(key string, value any) {
 }
 
 func (s *TapeSession) History() []*blades.Message {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return slices.Clone(s.history)
+	history, err := s.tapes.HistoryMessages(s.id, 0)
+	if err != nil {
+		log.Printf("load session history failed session=%s err=%v", s.id, err)
+		return nil
+	}
+	return history
 }
 
 func (s *TapeSession) Append(ctx context.Context, message *blades.Message) error {
-	if message == nil {
-		return nil
-	}
-	s.mu.Lock()
-	s.history = append(s.history, cloneMessage(message))
-	s.mu.Unlock()
-
-	return s.tapes.Append(s.id, "message", map[string]any{
-		"time":          time.Now().UTC().Format(time.RFC3339Nano),
-		"message_id":    message.ID,
-		"role":          string(message.Role),
-		"author":        message.Author,
-		"status":        string(message.Status),
-		"finish_reason": message.FinishReason,
-		"text":          message.Text(),
-	})
+	_ = ctx
+	return s.tapes.AppendMessage(s.id, message)
 }
 
 func (s *TapeSession) Reset() {
 	s.mu.Lock()
 	s.state = blades.State{}
-	s.history = nil
 	s.mu.Unlock()
-}
-
-func cloneMessage(in *blades.Message) *blades.Message {
-	if in == nil {
-		return nil
-	}
-	out := in.Clone()
-	out.Parts = slices.Clone(in.Parts)
-	out.Actions = maps.Clone(in.Actions)
-	out.Metadata = maps.Clone(in.Metadata)
-	return out
 }
 
 type SessionStore struct {

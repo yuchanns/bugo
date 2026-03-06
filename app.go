@@ -42,7 +42,7 @@ func NewApp(cfg Config) (*App, error) {
 		return nil, err
 	}
 
-	tapes, err := NewTapeStore(filepath.Join(cfg.HomeDir, "tapes"))
+	tapes, err := NewTapeStore(filepath.Join(cfg.HomeDir, "tapes"), cfg.Model)
 	if err != nil {
 		return nil, err
 	}
@@ -95,7 +95,7 @@ func (a *App) buildAgent() (blades.Agent, error) {
 		blades.WithTools(tools...),
 		blades.WithSkills(skillList...),
 		blades.WithMiddleware(
-			historyMiddleware(a.cfg.HistoryLimit),
+			tapeContextMiddleware(a.tapes, a.cfg.HistoryMaxTokens),
 			workspaceAgentsPromptMiddleware(a.workDir),
 			WithPatchedListSkill(),
 		),

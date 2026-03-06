@@ -9,9 +9,11 @@ require (
 	github.com/go-telegram/bot v1.19.0
 	github.com/google/jsonschema-go v0.3.0
 	github.com/google/uuid v1.6.0
+	github.com/tiktoken-go/tokenizer v0.7.0
 )
 
 require (
+	github.com/dlclark/regexp2 v1.11.5 // indirect
 	github.com/go-kratos/kit v0.0.0-20251121083925-65298ad2aa44 // indirect
 	github.com/jonboulle/clockwork v0.5.0 // indirect
 	github.com/kr/pretty v0.3.1 // indirect

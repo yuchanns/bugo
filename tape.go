@@ -12,7 +12,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-kratos/blades"
 	"github.com/google/uuid"
+	"github.com/tiktoken-go/tokenizer"
 )
 
 type TapeRecord struct {
@@ -32,15 +34,27 @@ type TapeInfo struct {
 }
 
 type TapeStore struct {
-	root string
-	mu   sync.Mutex
+	root      string
+	mu        sync.Mutex
+	tokenizer tokenizer.Codec
+	tokenMu   sync.Mutex
 }
 
-func NewTapeStore(root string) (*TapeStore, error) {
+func NewTapeStore(root, model string) (*TapeStore, error) {
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return nil, err
 	}
-	return &TapeStore{root: root}, nil
+	enc, err := tokenizer.ForModel(tokenizer.Model(strings.TrimSpace(model)))
+	if err != nil {
+		enc, err = tokenizer.Get(tokenizer.O200kBase)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return &TapeStore{
+		root:      root,
+		tokenizer: enc,
+	}, nil
 }
 
 func (s *TapeStore) Append(sessionID, kind string, payload map[string]any) error {
@@ -55,6 +69,54 @@ func (s *TapeStore) Append(sessionID, kind string, payload map[string]any) error
 		Payload:   payload,
 	}
 	return s.appendLocked(record)
+}
+
+func (s *TapeStore) AppendMessage(sessionID string, message *blades.Message) error {
+	if message == nil {
+		return nil
+	}
+	toolParts := extractToolParts(message.Parts)
+	if message.Role == blades.RoleTool && len(toolParts) > 0 {
+		callPayload := map[string]any{
+			"message_id":    message.ID,
+			"invocation_id": message.InvocationID,
+			"author":        message.Author,
+			"status":        string(message.Status),
+			"finish_reason": message.FinishReason,
+			"calls":         encodeToolCalls(toolParts),
+		}
+		if err := s.Append(sessionID, "tool_call", callPayload); err != nil {
+			return err
+		}
+		resultPayload := map[string]any{
+			"message_id":    message.ID,
+			"invocation_id": message.InvocationID,
+			"author":        message.Author,
+			"status":        string(message.Status),
+			"finish_reason": message.FinishReason,
+			"results":       encodeToolResults(toolParts),
+		}
+		return s.Append(sessionID, "tool_result", resultPayload)
+	}
+	payload := map[string]any{
+		"message_id":    message.ID,
+		"invocation_id": message.InvocationID,
+		"role":          string(message.Role),
+		"author":        message.Author,
+		"status":        string(message.Status),
+		"finish_reason": message.FinishReason,
+		"text":          message.Text(),
+		"parts":         encodeMessageParts(message.Parts),
+	}
+	return s.Append(sessionID, "message", payload)
+}
+
+func (s *TapeStore) HistoryMessages(sessionID string, maxTokens int) ([]*blades.Message, error) {
+	records, err := s.readAll(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	return selectMessagesByTokens(selectTapeMessages(records), maxTokens, s.countTokens), nil
 }
 
 func (s *TapeStore) appendLocked(record TapeRecord) error {
@@ -228,4 +290,325 @@ func (s *TapeStore) filePath(sessionID string) string {
 	sum := sha1.Sum([]byte(sessionID)) // #nosec G401
 	name := fmt.Sprintf("%s.jsonl", hex.EncodeToString(sum[:]))
 	return filepath.Join(s.root, name)
+}
+
+func encodeMessageParts(parts []blades.Part) []map[string]any {
+	if len(parts) == 0 {
+		return nil
+	}
+	out := make([]map[string]any, 0, len(parts))
+	for _, part := range parts {
+		switch v := part.(type) {
+		case blades.TextPart:
+			out = append(out, map[string]any{
+				"type": "text",
+				"text": v.Text,
+			})
+		case blades.ToolPart:
+			out = append(out, map[string]any{
+				"type":     "tool",
+				"id":       v.ID,
+				"name":     v.Name,
+				"request":  v.Request,
+				"response": v.Response,
+			})
+		}
+	}
+	return out
+}
+
+func extractToolParts(parts []blades.Part) []blades.ToolPart {
+	if len(parts) == 0 {
+		return nil
+	}
+	out := make([]blades.ToolPart, 0, len(parts))
+	for _, part := range parts {
+		if toolPart, ok := part.(blades.ToolPart); ok {
+			out = append(out, toolPart)
+		}
+	}
+	return out
+}
+
+func encodeToolCalls(parts []blades.ToolPart) []map[string]any {
+	if len(parts) == 0 {
+		return nil
+	}
+	out := make([]map[string]any, 0, len(parts))
+	for _, part := range parts {
+		out = append(out, map[string]any{
+			"id":        part.ID,
+			"name":      part.Name,
+			"arguments": part.Request,
+		})
+	}
+	return out
+}
+
+func encodeToolResults(parts []blades.ToolPart) []any {
+	if len(parts) == 0 {
+		return nil
+	}
+	out := make([]any, 0, len(parts))
+	for _, part := range parts {
+		out = append(out, part.Response)
+	}
+	return out
+}
+
+func decodeMessagePayload(payload map[string]any) *blades.Message {
+	if payload == nil {
+		return nil
+	}
+	msg := &blades.Message{
+		ID:           strings.TrimSpace(stringFromAny(payload["message_id"])),
+		InvocationID: strings.TrimSpace(stringFromAny(payload["invocation_id"])),
+		Role:         blades.Role(strings.TrimSpace(stringFromAny(payload["role"]))),
+		Author:       strings.TrimSpace(stringFromAny(payload["author"])),
+		Status:       blades.Status(strings.TrimSpace(stringFromAny(payload["status"]))),
+		FinishReason: strings.TrimSpace(stringFromAny(payload["finish_reason"])),
+	}
+	if msg.ID == "" {
+		msg.ID = blades.NewMessageID()
+	}
+	parts := decodeMessageParts(payload["parts"])
+	if len(parts) == 0 {
+		if text := strings.TrimSpace(stringFromAny(payload["text"])); text != "" {
+			parts = append(parts, blades.TextPart{Text: text})
+		}
+	}
+	msg.Parts = parts
+	if msg.Role == "" {
+		msg.Role = blades.RoleAssistant
+	}
+	return msg
+}
+
+func decodeMessageParts(value any) []blades.Part {
+	rawList, ok := value.([]any)
+	if !ok || len(rawList) == 0 {
+		return nil
+	}
+	parts := make([]blades.Part, 0, len(rawList))
+	for _, item := range rawList {
+		obj, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch strings.TrimSpace(stringFromAny(obj["type"])) {
+		case "text":
+			parts = append(parts, blades.TextPart{
+				Text: stringFromAny(obj["text"]),
+			})
+		case "tool":
+			parts = append(parts, blades.ToolPart{
+				ID:       stringFromAny(obj["id"]),
+				Name:     stringFromAny(obj["name"]),
+				Request:  stringFromAny(obj["request"]),
+				Response: stringFromAny(obj["response"]),
+			})
+		}
+	}
+	return parts
+}
+
+func selectTapeMessages(records []TapeRecord) []*blades.Message {
+	if len(records) == 0 {
+		return nil
+	}
+	out := make([]*blades.Message, 0, len(records))
+	var pendingCalls []blades.ToolPart
+	for _, rec := range records {
+		switch rec.Kind {
+		case "message":
+			msg := decodeMessagePayload(rec.Payload)
+			if msg != nil {
+				out = append(out, msg)
+			}
+		case "tool_call":
+			pendingCalls = decodeToolCalls(rec.Payload["calls"])
+		case "tool_result":
+			msg := buildToolMessage(rec.Payload, pendingCalls, rec.Payload["results"])
+			if msg != nil {
+				out = append(out, msg)
+			}
+			pendingCalls = nil
+		}
+	}
+	return out
+}
+
+func decodeToolCalls(value any) []blades.ToolPart {
+	items := anySlice(value)
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]blades.ToolPart, 0, len(items))
+	for _, item := range items {
+		obj, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		out = append(out, blades.ToolPart{
+			ID:      stringFromAny(obj["id"]),
+			Name:    stringFromAny(obj["name"]),
+			Request: stringFromAny(obj["arguments"]),
+		})
+	}
+	return out
+}
+
+func buildToolMessage(payload map[string]any, pending []blades.ToolPart, resultValue any) *blades.Message {
+	results := anySlice(resultValue)
+	total := len(pending)
+	if len(results) > total {
+		total = len(results)
+	}
+	if total == 0 {
+		return nil
+	}
+	parts := make([]blades.Part, 0, total)
+	for i := 0; i < total; i++ {
+		part := blades.ToolPart{}
+		if i < len(pending) {
+			part.ID = pending[i].ID
+			part.Name = pending[i].Name
+			part.Request = pending[i].Request
+		}
+		if i < len(results) {
+			part.Response = renderToolResult(results[i])
+		}
+		if part.ID == "" && part.Name == "" && part.Request == "" && part.Response == "" {
+			continue
+		}
+		parts = append(parts, part)
+	}
+	if len(parts) == 0 {
+		return nil
+	}
+	msg := &blades.Message{
+		ID:           strings.TrimSpace(stringFromAny(payload["message_id"])),
+		InvocationID: strings.TrimSpace(stringFromAny(payload["invocation_id"])),
+		Role:         blades.RoleTool,
+		Author:       strings.TrimSpace(stringFromAny(payload["author"])),
+		Status:       blades.Status(strings.TrimSpace(stringFromAny(payload["status"]))),
+		FinishReason: strings.TrimSpace(stringFromAny(payload["finish_reason"])),
+		Parts:        parts,
+	}
+	if msg.ID == "" {
+		msg.ID = blades.NewMessageID()
+	}
+	if msg.Status == "" {
+		msg.Status = blades.StatusCompleted
+	}
+	return msg
+}
+
+func anySlice(value any) []any {
+	if value == nil {
+		return nil
+	}
+	if out, ok := value.([]any); ok {
+		return out
+	}
+	return nil
+}
+
+func renderToolResult(value any) string {
+	switch v := value.(type) {
+	case string:
+		return v
+	default:
+		b, err := json.Marshal(v)
+		if err != nil {
+			return stringFromAny(v)
+		}
+		return string(b)
+	}
+}
+
+func selectMessagesByTokens(history []*blades.Message, maxTokens int, countTokens func(string) int) []*blades.Message {
+	if len(history) == 0 {
+		return nil
+	}
+	if maxTokens <= 0 {
+		return history
+	}
+	selected := make([]*blades.Message, 0, len(history))
+	used := 0
+	for i := len(history) - 1; i >= 0; i-- {
+		msg := history[i]
+		if msg == nil {
+			continue
+		}
+		size := messageTokens(msg, countTokens)
+		if size <= 0 {
+			continue
+		}
+		if used+size > maxTokens {
+			break
+		}
+		used += size
+		selected = append(selected, msg)
+	}
+	for i, j := 0, len(selected)-1; i < j; i, j = i+1, j-1 {
+		selected[i], selected[j] = selected[j], selected[i]
+	}
+	return selected
+}
+
+func messageTokens(msg *blades.Message, countTokens func(string) int) int {
+	if msg == nil {
+		return 0
+	}
+	if countTokens == nil {
+		countTokens = func(s string) int {
+			return len([]rune(s))
+		}
+	}
+	total := 0
+	for _, part := range msg.Parts {
+		switch v := part.(type) {
+		case blades.TextPart:
+			total += countTokens(v.Text)
+		case blades.ToolPart:
+			total += countTokens(v.Name)
+			total += countTokens(v.Request)
+			total += countTokens(v.Response)
+		default:
+			total += countTokens(stringFromAny(v))
+		}
+	}
+	return total
+}
+
+func (s *TapeStore) countTokens(text string) int {
+	if strings.TrimSpace(text) == "" {
+		return 0
+	}
+	// tokenizer.Codec is not documented as goroutine-safe.
+	s.tokenMu.Lock()
+	defer s.tokenMu.Unlock()
+	if s.tokenizer == nil {
+		return len([]rune(text))
+	}
+	n, err := s.tokenizer.Count(text)
+	if err != nil {
+		return len([]rune(text))
+	}
+	return n
+}
+
+func stringFromAny(v any) string {
+	if v == nil {
+		return ""
+	}
+	switch x := v.(type) {
+	case string:
+		return x
+	case fmt.Stringer:
+		return x.String()
+	default:
+		return fmt.Sprintf("%v", v)
+	}
 }

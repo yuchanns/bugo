@@ -2,25 +2,26 @@ package main
 
 import (
 	"context"
-	"slices"
+	"log"
 
 	"github.com/go-kratos/blades"
 	bladestools "github.com/go-kratos/blades/tools"
 	"github.com/google/jsonschema-go/jsonschema"
 )
 
-func historyMiddleware(limit int) blades.Middleware {
+func tapeContextMiddleware(tapes *TapeStore, maxTokens int) blades.Middleware {
 	return func(next blades.Handler) blades.Handler {
 		return blades.HandleFunc(func(ctx context.Context, invocation *blades.Invocation) blades.Generator[*blades.Message, error] {
-			if invocation == nil || invocation.Session == nil {
+			if invocation == nil || invocation.Session == nil || tapes == nil {
 				return next.Handle(ctx, invocation)
 			}
-
-			history := invocation.Session.History()
-			// Runner appends current user message into session before invocation.
-			// Exclude that message from injected history to avoid duplication.
+			history, err := tapes.HistoryMessages(invocation.Session.ID(), maxTokens)
+			if err != nil {
+				log.Printf("load tape context failed session=%s err=%v", invocation.Session.ID(), err)
+				return next.Handle(ctx, invocation)
+			}
 			if invocation.Message != nil {
-				filtered := history[:0]
+				filtered := make([]*blades.Message, 0, len(history))
 				for _, m := range history {
 					if m == nil || m.ID == invocation.Message.ID {
 						continue
@@ -29,13 +30,8 @@ func historyMiddleware(limit int) blades.Middleware {
 				}
 				history = filtered
 			}
-
-			if limit > 0 && len(history) > limit {
-				history = history[len(history)-limit:]
-			}
-
 			cloned := invocation.Clone()
-			cloned.History = slices.Clone(history)
+			cloned.History = history
 			return next.Handle(ctx, cloned)
 		})
 	}
