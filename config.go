@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 )
 
 const (
@@ -26,7 +25,6 @@ type Config struct {
 	ActiveWindow       int
 	Model              string
 	ModelMaxIterations int
-	ModelTimeout       time.Duration
 	MaxOutputTokens    int
 	APIKey             string
 	APIBase            string
@@ -48,7 +46,6 @@ func LoadConfig() (Config, error) {
 		ActiveWindow:       intEnv("BUGO_ACTIVE_WINDOW_SECONDS", 60),
 		Model:              firstNonEmpty(env("BUGO_MODEL"), defaultModel),
 		ModelMaxIterations: intEnv("BUGO_MAX_ITERATIONS", 20),
-		ModelTimeout:       time.Duration(intEnv("BUGO_MODEL_TIMEOUT_SECONDS", 90)) * time.Second,
 		MaxOutputTokens:    intEnv("BUGO_MAX_OUTPUT_TOKENS", 1024),
 		WorkDir:            env("BUGO_WORKDIR"),
 		HomeDir:            resolveHomeDir(firstNonEmpty(env("BUGO_HOME"), "~/.bugo")),

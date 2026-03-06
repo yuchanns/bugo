@@ -543,8 +543,7 @@ func (a *App) flushInbox(inbox *sessionInbox) {
 }
 
 func (a *App) runModelPrompt(session *TapeSession, prompt string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), a.cfg.ModelTimeout)
-	defer cancel()
+	ctx := context.Background()
 	runner := a.currentRunner()
 	if runner == nil {
 		return "", fmt.Errorf("runner is not initialized")
