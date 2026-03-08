@@ -467,6 +467,7 @@ func (a *App) onUpdate(ctx context.Context, _ *bot.Bot, update *models.Update) {
 	inbox.session.SetState("session_id", sessionID)
 	inbox.session.SetState("channel", "telegram")
 	inbox.session.SetState("chat_id", msg.Chat.ID)
+	inbox.session.SetState("round_telegram_message_id", 0)
 	if msg.From != nil {
 		inbox.session.SetState("sender_id", msg.From.ID)
 		if msg.From.Username != "" {
