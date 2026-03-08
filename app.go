@@ -295,9 +295,15 @@ func mergeSkills(base []skills.Skill, extra []skills.Skill) []skills.Skill {
 }
 
 func (a *App) buildTools() ([]tools.Tool, error) {
-	allTools := make([]tools.Tool, 0, 22)
+	allTools := make([]tools.Tool, 0, 24)
 
 	if err := addFuncTool(&allTools, "telegram_send", "Send a message to Telegram. If chat_id is omitted, use current session chat.", a.handleTelegramSendTool); err != nil {
+		return nil, err
+	}
+	if err := addFuncTool(&allTools, "telegram_edit", "Edit a Telegram message text. Prefer editing the previous message_id to update progress.", a.handleTelegramEditTool); err != nil {
+		return nil, err
+	}
+	if err := addFuncTool(&allTools, "telegram_get_update", "Wait for next user update in current Telegram session after asking a question.", a.handleTelegramGetUpdateTool); err != nil {
 		return nil, err
 	}
 	if err := addFuncTool(&allTools, "tape_recent", "Get latest tape records from current session.", a.handleTapeRecentTool); err != nil {
@@ -363,7 +369,9 @@ Excessively long context may cause model call failures. In this case, you SHOULD
 </context_contract>
 <response_instruct>
 You are handling Telegram messages.
-If proactive response mode is enabled, you MUST call "telegram_send" before finishing.
+If proactive response mode is enabled, you MUST call "telegram_send" or "telegram_edit" before finishing.
+When sending progress updates, prefer "telegram_edit" on the same message_id after an initial "telegram_send".
+After asking the user a question via "telegram_send"/"telegram_edit", you can call "telegram_get_update" to wait for reply.
 If proactive response mode is disabled, runtime can auto-send your assistant text.
 Session metadata is in state keys like "channel", "chat_id", "session_id".
 </response_instruct>
@@ -464,8 +472,24 @@ func (a *App) onUpdate(ctx context.Context, _ *bot.Bot, update *models.Update) {
 			inbox.session.SetState("sender_username", msg.From.Username)
 		}
 	}
-
 	isCommand := strings.HasPrefix(strings.TrimSpace(content), ",")
+	inbox.mu.Lock()
+	running := inbox.running
+	inbox.mu.Unlock()
+	if running && !isCommand && a.inboxes.hasWaiter(sessionID) {
+		a.inboxes.pushUpdate(sessionID, telegramSessionUpdate{
+			MessageID: msg.ID,
+			ChatID:    msg.Chat.ID,
+			Text:      content,
+			Type:      messageType(msg),
+			SenderID:  int64FromAny(senderID(msg)),
+			Username:  senderUsername(msg),
+			FullName:  senderFullName(msg),
+			Date:      msg.Date,
+		})
+		return
+	}
+
 	if isCommand {
 		a.handleCommand(ctx, inbox, content)
 		return
@@ -765,7 +789,114 @@ func (a *App) handleTelegramSendTool(ctx context.Context, in telegramSendInput) 
 	if err != nil {
 		return telegramSendOutput{}, err
 	}
+	if s, ok := blades.FromSessionContext(ctx); ok && s != nil {
+		s.SetState("last_telegram_message_id", resp.ID)
+		s.SetState("last_telegram_chat_id", chatID)
+	}
 	return telegramSendOutput{Sent: true, MessageID: resp.ID}, nil
+}
+
+type telegramEditInput struct {
+	ChatID    int64  `json:"chat_id,omitempty"`
+	MessageID int    `json:"message_id,omitempty"`
+	Text      string `json:"text"`
+}
+
+type telegramEditOutput struct {
+	Edited    bool `json:"edited"`
+	MessageID int  `json:"message_id,omitempty"`
+}
+
+func (a *App) handleTelegramEditTool(ctx context.Context, in telegramEditInput) (telegramEditOutput, error) {
+	chatID := in.ChatID
+	messageID := in.MessageID
+	if s, ok := blades.FromSessionContext(ctx); ok && s != nil {
+		state := s.State()
+		if chatID == 0 {
+			chatID = int64FromAny(state["chat_id"])
+		}
+		if messageID == 0 {
+			messageID = int(int64FromAny(state["last_telegram_message_id"]))
+		}
+	}
+	if chatID == 0 {
+		return telegramEditOutput{}, fmt.Errorf("chat_id is required")
+	}
+	if messageID <= 0 {
+		return telegramEditOutput{}, fmt.Errorf("message_id is required")
+	}
+	if strings.TrimSpace(in.Text) == "" {
+		return telegramEditOutput{}, fmt.Errorf("text is required")
+	}
+	resp, err := a.bot.EditMessageText(ctx, &bot.EditMessageTextParams{
+		ChatID:    chatID,
+		MessageID: messageID,
+		Text:      in.Text,
+	})
+	if err != nil {
+		return telegramEditOutput{}, err
+	}
+	if s, ok := blades.FromSessionContext(ctx); ok && s != nil {
+		s.SetState("last_telegram_message_id", messageID)
+		s.SetState("last_telegram_chat_id", chatID)
+	}
+	outID := messageID
+	if resp != nil && resp.ID != 0 {
+		outID = resp.ID
+	}
+	return telegramEditOutput{Edited: true, MessageID: outID}, nil
+}
+
+type telegramGetUpdateInput struct {
+	TimeoutSeconds int `json:"timeout_seconds,omitempty"`
+}
+
+type telegramGetUpdateItem struct {
+	MessageID int    `json:"message_id"`
+	ChatID    int64  `json:"chat_id"`
+	Text      string `json:"text"`
+	Type      string `json:"type"`
+	SenderID  int64  `json:"sender_id"`
+	Username  string `json:"username,omitempty"`
+	FullName  string `json:"full_name,omitempty"`
+	Date      int    `json:"date"`
+}
+
+type telegramGetUpdateOutput struct {
+	Received bool                   `json:"received"`
+	TimedOut bool                   `json:"timed_out,omitempty"`
+	Update   *telegramGetUpdateItem `json:"update,omitempty"`
+}
+
+func (a *App) handleTelegramGetUpdateTool(ctx context.Context, in telegramGetUpdateInput) (telegramGetUpdateOutput, error) {
+	sessionID, err := sessionIDFromContext(ctx)
+	if err != nil {
+		return telegramGetUpdateOutput{}, err
+	}
+	timeout := time.Duration(in.TimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = time.Minute
+	}
+	if timeout > 10*time.Minute {
+		timeout = 10 * time.Minute
+	}
+	update, ok := a.inboxes.waitForUpdate(sessionID, timeout)
+	if !ok {
+		return telegramGetUpdateOutput{TimedOut: true}, nil
+	}
+	return telegramGetUpdateOutput{
+		Received: true,
+		Update: &telegramGetUpdateItem{
+			MessageID: update.MessageID,
+			ChatID:    update.ChatID,
+			Text:      update.Text,
+			Type:      update.Type,
+			SenderID:  update.SenderID,
+			Username:  update.Username,
+			FullName:  update.FullName,
+			Date:      update.Date,
+		},
+	}, nil
 }
 
 type tapeRecentInput struct {
