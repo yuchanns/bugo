@@ -76,30 +76,6 @@ func (a *App) handleFSEditTool(_ context.Context, in fsEditToolInput) (string, e
 	})
 }
 
-type webFetchToolInput struct {
-	URL string `json:"url"`
-}
-
-func (a *App) handleWebFetchTool(ctx context.Context, in webFetchToolInput) (string, error) {
-	return a.execWebFetch(ctx, parsedCommandArgs{
-		Kwargs: map[string]string{
-			"url": in.URL,
-		},
-	})
-}
-
-type webSearchToolInput struct {
-	Query string `json:"query"`
-}
-
-func (a *App) handleWebSearchTool(_ context.Context, in webSearchToolInput) (string, error) {
-	return a.execWebSearch(parsedCommandArgs{
-		Kwargs: map[string]string{
-			"query": in.Query,
-		},
-	})
-}
-
 type scheduleAddToolInput struct {
 	Cron    string `json:"cron"`
 	Message string `json:"message"`

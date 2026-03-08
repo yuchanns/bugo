@@ -114,8 +114,6 @@ Command examples:
 ,fs.read path=README.md
 ,fs.write path=notes/todo.txt content="hello"
 ,fs.edit path=notes/todo.txt old=hello new=world
-,web.fetch url=https://example.com
-,web.search query=golang
 ,tape.handoff name=phase-1 summary="bootstrap done"
 ,tape.anchors
 ,tape.info

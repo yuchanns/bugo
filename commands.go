@@ -4,9 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -36,8 +33,6 @@ var builtinCommandSpecs = map[string]commandSpec{
 	"fs.read":       {Name: "fs.read", Description: "Read file content", Usage: ",fs.read path=README.md"},
 	"fs.write":      {Name: "fs.write", Description: "Write file content", Usage: ",fs.write path=note.txt content='hello'"},
 	"fs.edit":       {Name: "fs.edit", Description: "Replace text in file", Usage: ",fs.edit path=note.txt old='hello' new='world'"},
-	"web.fetch":     {Name: "web.fetch", Description: "Fetch URL body", Usage: ",web.fetch url=https://example.com"},
-	"web.search":    {Name: "web.search", Description: "Build a DuckDuckGo search URL", Usage: ",web.search query=golang"},
 	"schedule.add":  {Name: "schedule.add", Description: "Add a cron schedule", Usage: ",schedule.add cron='*/5 * * * *' message='echo hello'"},
 	"schedule.list": {Name: "schedule.list", Description: "List scheduled jobs", Usage: ",schedule.list"},
 	"schedule.remove": {
@@ -171,10 +166,6 @@ func (a *App) executeCommand(ctx context.Context, inbox *sessionInbox, content s
 		return a.execFSWrite(parsed)
 	case "fs.edit":
 		return a.execFSEdit(parsed)
-	case "web.fetch":
-		return a.execWebFetch(ctx, parsed)
-	case "web.search":
-		return a.execWebSearch(parsed)
 	case "quit":
 		return "exit", nil
 	default:
@@ -528,47 +519,6 @@ func (a *App) execFSEdit(parsed parsedCommandArgs) (string, error) {
 		return "", err
 	}
 	return fmt.Sprintf("edited: %s", resolved), nil
-}
-
-func (a *App) execWebFetch(ctx context.Context, parsed parsedCommandArgs) (string, error) {
-	targetURL := strings.TrimSpace(parsed.Kwargs["url"])
-	if targetURL == "" && len(parsed.Positional) > 0 {
-		targetURL = strings.TrimSpace(parsed.Positional[0])
-	}
-	if targetURL == "" {
-		return "", fmt.Errorf("url is required")
-	}
-	if _, err := url.ParseRequestURI(targetURL); err != nil {
-		return "", fmt.Errorf("invalid url: %w", err)
-	}
-
-	client := &http.Client{Timeout: 15 * time.Second}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
-	if err != nil {
-		return "", err
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 200_000))
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("status=%d\n%s", resp.StatusCode, string(body)), nil
-}
-
-func (a *App) execWebSearch(parsed parsedCommandArgs) (string, error) {
-	query := strings.TrimSpace(parsed.Kwargs["query"])
-	if query == "" && len(parsed.Positional) > 0 {
-		query = strings.TrimSpace(strings.Join(parsed.Positional, " "))
-	}
-	if query == "" {
-		return "", fmt.Errorf("query is required")
-	}
-	return "https://duckduckgo.com/?q=" + url.QueryEscape(query), nil
 }
 
 func (a *App) execBash(ctx context.Context, parsed parsedCommandArgs) (string, error) {

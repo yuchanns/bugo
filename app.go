@@ -236,7 +236,7 @@ func mergeSkills(base []skills.Skill, extra []skills.Skill) []skills.Skill {
 }
 
 func (a *App) buildTools() ([]tools.Tool, error) {
-	allTools := make([]tools.Tool, 0, 24)
+	allTools := make([]tools.Tool, 0, 22)
 
 	if err := addFuncTool(&allTools, "telegram_send", "Send a message to Telegram. If chat_id is omitted, use current session chat.", a.handleTelegramSendTool); err != nil {
 		return nil, err
@@ -260,12 +260,6 @@ func (a *App) buildTools() ([]tools.Tool, error) {
 		return nil, err
 	}
 	if err := addFuncTool(&allTools, "fs_edit", "Replace first matched text in a file.", a.handleFSEditTool); err != nil {
-		return nil, err
-	}
-	if err := addFuncTool(&allTools, "web_fetch", "Fetch URL body with status code.", a.handleWebFetchTool); err != nil {
-		return nil, err
-	}
-	if err := addFuncTool(&allTools, "web_search", "Build a web search URL.", a.handleWebSearchTool); err != nil {
 		return nil, err
 	}
 	if err := addFuncTool(&allTools, "schedule_add", "Add a cron schedule for current session chat.", a.handleScheduleAddTool); err != nil {
@@ -296,7 +290,7 @@ func (a *App) buildTools() ([]tools.Tool, error) {
 func (a *App) systemInstruction() string {
 	return strings.TrimSpace(`
 <runtime_contract>
-1. Use tool calls for all actions (file ops, shell, web, tape, skills, scheduling).
+1. Use tool calls for all actions (file ops, shell, tape, skills, scheduling).
 2. Do not emit comma-prefixed commands in normal flow; use tool calls instead.
 3. If a compatibility fallback is required, runtime can still parse comma commands.
 4. Never emit '<command ...>' blocks yourself; those are runtime-generated.
