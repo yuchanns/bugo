@@ -41,9 +41,9 @@ type fsReadToolInput struct {
 }
 
 func (a *App) handleFSReadTool(_ context.Context, in fsReadToolInput) (string, error) {
-	return a.execFSRead(parsedCommandArgs{
+	return toolResult(a.execFSRead(parsedCommandArgs{
 		Kwargs: map[string]string{"path": in.Path},
-	})
+	}))
 }
 
 type fsWriteToolInput struct {
@@ -52,12 +52,12 @@ type fsWriteToolInput struct {
 }
 
 func (a *App) handleFSWriteTool(_ context.Context, in fsWriteToolInput) (string, error) {
-	return a.execFSWrite(parsedCommandArgs{
+	return toolResult(a.execFSWrite(parsedCommandArgs{
 		Kwargs: map[string]string{
 			"path":    in.Path,
 			"content": in.Content,
 		},
-	})
+	}))
 }
 
 type fsEditToolInput struct {
@@ -67,13 +67,20 @@ type fsEditToolInput struct {
 }
 
 func (a *App) handleFSEditTool(_ context.Context, in fsEditToolInput) (string, error) {
-	return a.execFSEdit(parsedCommandArgs{
+	return toolResult(a.execFSEdit(parsedCommandArgs{
 		Kwargs: map[string]string{
 			"path": in.Path,
 			"old":  in.Old,
 			"new":  in.New,
 		},
-	})
+	}))
+}
+
+func toolResult(result string, err error) (string, error) {
+	if err != nil {
+		return "Error: " + err.Error(), nil
+	}
+	return result, nil
 }
 
 type scheduleAddToolInput struct {
