@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -21,6 +22,7 @@ import (
 	"github.com/go-kratos/blades/tools"
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
+	"github.com/openai/openai-go/v3/option"
 )
 
 type App struct {
@@ -113,6 +115,9 @@ func (a *App) buildAgent() (blades.Agent, error) {
 		BaseURL:         a.cfg.APIBase,
 		APIKey:          a.cfg.APIKey,
 		MaxOutputTokens: int64(a.cfg.MaxOutputTokens),
+		RequestOptions: []option.RequestOption{
+			option.WithHTTPClient(newOpenAIHTTPClient()),
+		},
 	}
 	model := openai.NewModel(a.cfg.Model, modelConfig)
 
@@ -141,6 +146,60 @@ func (a *App) buildAgent() (blades.Agent, error) {
 		),
 		blades.WithMaxIterations(a.cfg.ModelMaxIterations),
 	)
+}
+
+func newOpenAIHTTPClient() *http.Client {
+	return &http.Client{
+		Transport: &openAIStatusLoggingTransport{
+			base: http.DefaultTransport,
+		},
+	}
+}
+
+type openAIStatusLoggingTransport struct {
+	base http.RoundTripper
+}
+
+func (t *openAIStatusLoggingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	base := t.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	resp, err := base.RoundTrip(req)
+	if err != nil {
+		return nil, err
+	}
+	if resp == nil || resp.Body == nil {
+		return resp, nil
+	}
+	resp.Body = &openAIResponseBodyLogger{
+		body:      resp.Body,
+		method:    req.Method,
+		url:       req.URL.String(),
+		status:    resp.StatusCode,
+		shouldLog: resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices,
+	}
+	return resp, nil
+}
+
+type openAIResponseBodyLogger struct {
+	body      io.ReadCloser
+	method    string
+	url       string
+	status    int
+	shouldLog bool
+}
+
+func (r *openAIResponseBodyLogger) Read(p []byte) (int, error) {
+	n, err := r.body.Read(p)
+	if r.shouldLog && n > 0 {
+		log.Printf("openai non-2xx response chunk: method=%s url=%s status=%d chunk=%s", r.method, r.url, r.status, string(p[:n]))
+	}
+	return n, err
+}
+
+func (r *openAIResponseBodyLogger) Close() error {
+	return r.body.Close()
 }
 
 func (a *App) loadSkills() ([]skills.Skill, error) {
