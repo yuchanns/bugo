@@ -388,6 +388,7 @@ func (a *App) Run(ctx context.Context) error {
 		bot.WithDefaultHandler(a.onUpdate),
 		bot.WithAllowedUpdates(bot.AllowedUpdates{models.AllowedUpdateMessage}),
 		bot.WithWorkers(a.cfg.TelegramWorkers),
+		bot.WithSkipGetMe(),
 	}
 	if httpClient != nil {
 		opts = append(opts, bot.WithHTTPClient(time.Minute, httpClient))
