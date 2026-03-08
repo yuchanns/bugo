@@ -602,6 +602,7 @@ func (a *App) flushInbox(inbox *sessionInbox) {
 	prompt := strings.Join(inbox.pending, "\n")
 	chatID := inbox.chatID
 	session := inbox.session
+	session.SetState("round_telegram_message_id", 0)
 	inbox.pending = nil
 	inbox.running = true
 	inbox.mu.Unlock()
@@ -791,6 +792,7 @@ func (a *App) handleTelegramSendTool(ctx context.Context, in telegramSendInput) 
 		return telegramSendOutput{}, err
 	}
 	if s, ok := blades.FromSessionContext(ctx); ok && s != nil {
+		s.SetState("round_telegram_message_id", resp.ID)
 		s.SetState("last_telegram_message_id", resp.ID)
 		s.SetState("last_telegram_chat_id", chatID)
 	}
@@ -817,7 +819,7 @@ func (a *App) handleTelegramEditTool(ctx context.Context, in telegramEditInput) 
 			chatID = int64FromAny(state["chat_id"])
 		}
 		if messageID == 0 {
-			messageID = int(int64FromAny(state["last_telegram_message_id"]))
+			messageID = int(int64FromAny(state["round_telegram_message_id"]))
 		}
 	}
 	if chatID == 0 {
@@ -838,6 +840,7 @@ func (a *App) handleTelegramEditTool(ctx context.Context, in telegramEditInput) 
 		return telegramEditOutput{}, err
 	}
 	if s, ok := blades.FromSessionContext(ctx); ok && s != nil {
+		s.SetState("round_telegram_message_id", messageID)
 		s.SetState("last_telegram_message_id", messageID)
 		s.SetState("last_telegram_chat_id", chatID)
 	}
