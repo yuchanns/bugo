@@ -140,7 +140,7 @@ func (a *App) buildAgent() (blades.Agent, error) {
 		blades.WithTools(tools...),
 		blades.WithSkills(skillList...),
 		blades.WithMiddleware(
-			tapeContextMiddleware(a.tapes, a.cfg.HistoryMaxTokens),
+			tapeContextMiddleware(a.tapes),
 			workspaceAgentsPromptMiddleware(a.workDir),
 			patchToolSchemas(),
 		),

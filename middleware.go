@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
 	"strings"
 
@@ -10,15 +11,22 @@ import (
 	"github.com/google/jsonschema-go/jsonschema"
 )
 
-func tapeContextMiddleware(tapes *TapeStore, maxTokens int) blades.Middleware {
+func tapeContextMiddleware(tapes *TapeStore) blades.Middleware {
 	return func(next blades.Handler) blades.Handler {
 		return blades.HandleFunc(func(ctx context.Context, invocation *blades.Invocation) blades.Generator[*blades.Message, error] {
 			if invocation == nil || invocation.Session == nil || tapes == nil {
 				return next.Handle(ctx, invocation)
 			}
-			history, err := tapes.HistoryMessages(invocation.Session.ID(), maxTokens)
+			sessionID := invocation.Session.ID()
+			if err := tapes.EnsureBootstrapAnchor(sessionID); err != nil {
+				log.Printf("ensure tape bootstrap anchor failed session=%s err=%v", sessionID, err)
+				return next.Handle(ctx, invocation)
+			}
+			history, err := tapes.HistoryMessages(sessionID)
 			if err != nil {
-				log.Printf("load tape context failed session=%s err=%v", invocation.Session.ID(), err)
+				if !errors.Is(err, errTapeAnchorNotFound) {
+					log.Printf("load tape context failed session=%s err=%v", sessionID, err)
+				}
 				return next.Handle(ctx, invocation)
 			}
 			if invocation.Message != nil {

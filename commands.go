@@ -358,6 +358,9 @@ func (a *App) execTapeReset(inbox *sessionInbox, parsed parsedCommandArgs) (stri
 	if err != nil {
 		return "", err
 	}
+	if err := a.tapes.EnsureBootstrapAnchor(inbox.session.ID()); err != nil {
+		return "", err
+	}
 	inbox.session.Reset()
 	inbox.resetRuntime()
 	return result, nil

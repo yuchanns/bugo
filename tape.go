@@ -17,7 +17,6 @@ import (
 
 	"github.com/go-kratos/blades"
 	"github.com/google/uuid"
-	"github.com/tiktoken-go/tokenizer"
 )
 
 type TapeRecord struct {
@@ -37,12 +36,12 @@ type TapeInfo struct {
 }
 
 type TapeStore struct {
-	root      string
-	mu        sync.Mutex
-	files     map[string]*tapeFile
-	tokenizer tokenizer.Codec
-	tokenMu   sync.Mutex
+	root  string
+	mu    sync.Mutex
+	files map[string]*tapeFile
 }
+
+var errTapeAnchorNotFound = errors.New("tape anchor not found")
 
 type tapeFile struct {
 	records []TapeRecord
@@ -54,21 +53,13 @@ func (f *tapeFile) reset() {
 	f.offset = 0
 }
 
-func NewTapeStore(root, model string) (*TapeStore, error) {
+func NewTapeStore(root, _ string) (*TapeStore, error) {
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return nil, err
 	}
-	enc, err := tokenizer.ForModel(tokenizer.Model(strings.TrimSpace(model)))
-	if err != nil {
-		enc, err = tokenizer.Get(tokenizer.O200kBase)
-		if err != nil {
-			return nil, err
-		}
-	}
 	return &TapeStore{
-		root:      root,
-		files:     map[string]*tapeFile{},
-		tokenizer: enc,
+		root:  root,
+		files: map[string]*tapeFile{},
 	}, nil
 }
 
@@ -126,12 +117,34 @@ func (s *TapeStore) AppendMessage(sessionID string, message *blades.Message) err
 	return s.Append(sessionID, "message", payload)
 }
 
-func (s *TapeStore) HistoryMessages(sessionID string, maxTokens int) ([]*blades.Message, error) {
+func (s *TapeStore) HistoryMessages(sessionID string) ([]*blades.Message, error) {
 	records, err := s.readAll(sessionID)
 	if err != nil {
 		return nil, err
 	}
-	return selectMessagesByTokens(selectTapeMessages(records), maxTokens, s.countTokens), nil
+	selected, err := selectRecordsAfterLastAnchor(records)
+	if err != nil {
+		return nil, err
+	}
+	return selectTapeMessages(selected), nil
+}
+
+func (s *TapeStore) EnsureBootstrapAnchor(sessionID string) error {
+	records, err := s.readAll(sessionID)
+	if err != nil {
+		return err
+	}
+	for _, rec := range records {
+		if isAnchorRecord(rec) {
+			return nil
+		}
+	}
+	return s.Append(sessionID, "anchor", map[string]any{
+		"name": "session/start",
+		"state": map[string]any{
+			"owner": "human",
+		},
+	})
 }
 
 func (s *TapeStore) appendLocked(record TapeRecord) error {
@@ -200,7 +213,7 @@ func (s *TapeStore) Anchors(sessionID string, limit int) ([]TapeRecord, error) {
 	}
 	anchors := make([]TapeRecord, 0, len(records))
 	for _, rec := range records {
-		if rec.Kind == "anchor" || rec.Kind == "handoff" {
+		if isAnchorRecord(rec) {
 			anchors = append(anchors, rec)
 		}
 	}
@@ -221,7 +234,7 @@ func (s *TapeStore) Info(sessionID string) (TapeInfo, error) {
 	}
 	lastAnchorIdx := -1
 	for idx, rec := range records {
-		if rec.Kind != "anchor" && rec.Kind != "handoff" {
+		if !isAnchorRecord(rec) {
 			continue
 		}
 		info.Anchors++
@@ -490,6 +503,32 @@ func selectTapeMessages(records []TapeRecord) []*blades.Message {
 	return out
 }
 
+func selectRecordsAfterLastAnchor(records []TapeRecord) ([]TapeRecord, error) {
+	if len(records) == 0 {
+		return nil, errTapeAnchorNotFound
+	}
+	lastAnchorIdx := -1
+	for i := len(records) - 1; i >= 0; i-- {
+		if isAnchorRecord(records[i]) {
+			lastAnchorIdx = i
+			break
+		}
+	}
+	if lastAnchorIdx < 0 {
+		return nil, errTapeAnchorNotFound
+	}
+	if lastAnchorIdx+1 >= len(records) {
+		return nil, nil
+	}
+	out := make([]TapeRecord, len(records[lastAnchorIdx+1:]))
+	copy(out, records[lastAnchorIdx+1:])
+	return out, nil
+}
+
+func isAnchorRecord(rec TapeRecord) bool {
+	return rec.Kind == "anchor" || rec.Kind == "handoff"
+}
+
 func decodeToolCalls(value any) []blades.ToolPart {
 	items := anySlice(value)
 	if len(items) == 0 {
@@ -577,78 +616,6 @@ func renderToolResult(value any) string {
 		}
 		return string(b)
 	}
-}
-
-func selectMessagesByTokens(history []*blades.Message, maxTokens int, countTokens func(string) int) []*blades.Message {
-	if len(history) == 0 {
-		return nil
-	}
-	if maxTokens <= 0 {
-		return history
-	}
-	selected := make([]*blades.Message, 0, len(history))
-	used := 0
-	for i := len(history) - 1; i >= 0; i-- {
-		msg := history[i]
-		if msg == nil {
-			continue
-		}
-		size := messageTokens(msg, countTokens)
-		if size <= 0 {
-			continue
-		}
-		if used+size > maxTokens {
-			break
-		}
-		used += size
-		selected = append(selected, msg)
-	}
-	for i, j := 0, len(selected)-1; i < j; i, j = i+1, j-1 {
-		selected[i], selected[j] = selected[j], selected[i]
-	}
-	return selected
-}
-
-func messageTokens(msg *blades.Message, countTokens func(string) int) int {
-	if msg == nil {
-		return 0
-	}
-	if countTokens == nil {
-		countTokens = func(s string) int {
-			return len([]rune(s))
-		}
-	}
-	total := 0
-	for _, part := range msg.Parts {
-		switch v := part.(type) {
-		case blades.TextPart:
-			total += countTokens(v.Text)
-		case blades.ToolPart:
-			total += countTokens(v.Name)
-			total += countTokens(v.Request)
-			total += countTokens(v.Response)
-		default:
-			total += countTokens(stringFromAny(v))
-		}
-	}
-	return total
-}
-
-func (s *TapeStore) countTokens(text string) int {
-	if strings.TrimSpace(text) == "" {
-		return 0
-	}
-	// tokenizer.Codec is not documented as goroutine-safe.
-	s.tokenMu.Lock()
-	defer s.tokenMu.Unlock()
-	if s.tokenizer == nil {
-		return len([]rune(text))
-	}
-	n, err := s.tokenizer.Count(text)
-	if err != nil {
-		return len([]rune(text))
-	}
-	return n
 }
 
 func stringFromAny(v any) string {

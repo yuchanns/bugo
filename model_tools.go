@@ -200,6 +200,9 @@ func (a *App) handleTapeResetTool(ctx context.Context, in tapeResetToolInput) (t
 	if err != nil {
 		return tapeResetToolOutput{}, err
 	}
+	if err := a.tapes.EnsureBootstrapAnchor(sessionID); err != nil {
+		return tapeResetToolOutput{}, err
+	}
 	if s, ok := blades.FromSessionContext(ctx); ok {
 		if ts, ok := s.(*TapeSession); ok {
 			ts.Reset()

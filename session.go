@@ -46,7 +46,7 @@ func (s *TapeSession) SetState(key string, value any) {
 }
 
 func (s *TapeSession) History() []*blades.Message {
-	history, err := s.tapes.HistoryMessages(s.id, 0)
+	history, err := s.tapes.HistoryMessages(s.id)
 	if err != nil {
 		log.Printf("load session history failed session=%s err=%v", s.id, err)
 		return nil
@@ -85,10 +85,7 @@ func (s *SessionStore) Get(sessionID string) *TapeSession {
 		return existing
 	}
 	created := NewTapeSession(sessionID, s.tapes)
-	_ = s.tapes.Append(sessionID, "session.start", map[string]any{
-		"session_id": sessionID,
-		"started_at": time.Now().UTC().Format(time.RFC3339Nano),
-	})
+	_ = s.tapes.EnsureBootstrapAnchor(sessionID)
 	s.sets[sessionID] = created
 	return created
 }
