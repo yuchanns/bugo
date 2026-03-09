@@ -366,6 +366,11 @@ func (a *App) systemInstruction() string {
 </runtime_contract>
 <context_contract>
 Excessively long context may cause model call failures. In this case, you SHOULD first use tape_handoff tool to shorten the retrieved history.
+Use tape_handoff proactively to keep context compact:
+- Create a handoff after finishing a meaningful subtask or decision point.
+- Create a handoff before long multi-tool workflows.
+- If context-related instability appears, handoff first, then continue.
+- Avoid noisy handoffs: at most one handoff per user turn unless there is a clear phase change.
 </context_contract>
 <response_instruct>
 You are handling Telegram messages.
