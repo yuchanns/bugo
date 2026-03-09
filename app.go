@@ -315,6 +315,9 @@ func (a *App) buildTools() ([]tools.Tool, error) {
 	if err := addFuncTool(&allTools, "tape_handoff", "Write a compact handoff summary into tape.", a.handleTapeHandoffTool); err != nil {
 		return nil, err
 	}
+	if err := addFuncTool(&allTools, "write_todos", "Create or replace structured todo list for current task. Use statuses: pending, in_progress, completed.", a.handleWriteTodosTool); err != nil {
+		return nil, err
+	}
 	if err := addFuncTool(&allTools, "bash", "Run shell command in workspace.", a.handleBashTool); err != nil {
 		return nil, err
 	}
@@ -363,6 +366,7 @@ func (a *App) systemInstruction() string {
 6. Use '$name' hints to request detail expansion for tools/skills when needed.
 7. The "bash" tool is available in this runtime; do not claim shell access is unavailable when bash can be used.
 8. If the user asks for runtime/system information, first call "bash" with safe read-only commands (for example: uname -a, cat /etc/os-release) and then summarize outputs.
+9. Please continuously maintain "write_todos" and update task progress in time during the task.
 </runtime_contract>
 <context_contract>
 Excessively long context may cause model call failures. In this case, you SHOULD first use tape_handoff tool to shorten the retrieved history.

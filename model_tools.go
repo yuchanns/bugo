@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -81,6 +82,51 @@ func toolResult(result string, err error) (string, error) {
 		return "Error: " + err.Error(), nil
 	}
 	return result, nil
+}
+
+type todoItem struct {
+	Content string `json:"content"`
+	Status  string `json:"status"`
+}
+
+type writeTodosToolInput struct {
+	Todos []todoItem `json:"todos"`
+}
+
+func (a *App) handleWriteTodosTool(ctx context.Context, in writeTodosToolInput) (string, error) {
+	normalized, err := normalizeTodos(in.Todos)
+	if err != nil {
+		return "", err
+	}
+	if s, ok := blades.FromSessionContext(ctx); ok && s != nil {
+		s.SetState("todos", normalized)
+	}
+	data, err := json.Marshal(normalized)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("Updated todo list to %s", data), nil
+}
+
+func normalizeTodos(items []todoItem) ([]todoItem, error) {
+	out := make([]todoItem, 0, len(items))
+	for i, item := range items {
+		content := strings.TrimSpace(item.Content)
+		if content == "" {
+			return nil, fmt.Errorf("todos[%d].content is required", i)
+		}
+		status := strings.ToLower(strings.TrimSpace(item.Status))
+		switch status {
+		case "pending", "in_progress", "completed":
+		default:
+			return nil, fmt.Errorf("todos[%d].status must be one of pending,in_progress,completed", i)
+		}
+		out = append(out, todoItem{
+			Content: content,
+			Status:  status,
+		})
+	}
+	return out, nil
 }
 
 type scheduleAddToolInput struct {
