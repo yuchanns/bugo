@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"iter"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,30 +37,18 @@ type TapeInfo struct {
 }
 
 type TapeStore struct {
-	root  string
-	mu    sync.Mutex
-	files map[string]*tapeFile
+	root string
+	mu   sync.RWMutex
 }
 
 var errTapeAnchorNotFound = errors.New("tape anchor not found")
-
-type tapeFile struct {
-	records []TapeRecord
-	offset  int64
-}
-
-func (f *tapeFile) reset() {
-	f.records = nil
-	f.offset = 0
-}
 
 func NewTapeStore(root, _ string) (*TapeStore, error) {
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return nil, err
 	}
 	return &TapeStore{
-		root:  root,
-		files: map[string]*tapeFile{},
+		root: root,
 	}, nil
 }
 
@@ -74,7 +63,10 @@ func (s *TapeStore) Append(sessionID, kind string, payload map[string]any) error
 		Kind:      kind,
 		Payload:   payload,
 	}
-	return s.appendLocked(record)
+	if err := s.appendLocked(record); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (s *TapeStore) AppendMessage(sessionID string, message *blades.Message) error {
@@ -118,33 +110,57 @@ func (s *TapeStore) AppendMessage(sessionID string, message *blades.Message) err
 }
 
 func (s *TapeStore) HistoryMessages(sessionID string) ([]*blades.Message, error) {
-	records, err := s.readAll(sessionID)
-	if err != nil {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	history := make([]TapeRecord, 0, 64)
+	foundAnchor := false
+	if err := s.forEachRecordLocked(sessionID, func(rec TapeRecord) bool {
+		if isAnchorRecord(rec) {
+			foundAnchor = true
+			history = history[:0]
+			return true
+		}
+		if foundAnchor {
+			history = append(history, rec)
+		}
+		return true
+	}); err != nil {
 		return nil, err
 	}
-	selected, err := selectRecordsAfterLastAnchor(records)
-	if err != nil {
-		return nil, err
+	if !foundAnchor {
+		return nil, errTapeAnchorNotFound
 	}
-	return selectTapeMessages(selected), nil
+	return selectTapeMessages(history), nil
 }
 
 func (s *TapeStore) EnsureBootstrapAnchor(sessionID string) error {
-	records, err := s.readAll(sessionID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	hasAnchor, err := s.hasAnchorStreamLocked(sessionID)
 	if err != nil {
 		return err
 	}
-	for _, rec := range records {
-		if isAnchorRecord(rec) {
-			return nil
-		}
+	if hasAnchor {
+		return nil
 	}
-	return s.Append(sessionID, "anchor", map[string]any{
-		"name": "session/start",
-		"state": map[string]any{
-			"owner": "human",
+	record := TapeRecord{
+		ID:        uuid.NewString(),
+		SessionID: sessionID,
+		Time:      time.Now().UTC(),
+		Kind:      "anchor",
+		Payload: map[string]any{
+			"name": "session/start",
+			"state": map[string]any{
+				"owner": "human",
+			},
 		},
-	})
+	}
+	if err := s.appendLocked(record); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (s *TapeStore) appendLocked(record TapeRecord) error {
@@ -163,88 +179,86 @@ func (s *TapeStore) appendLocked(record TapeRecord) error {
 }
 
 func (s *TapeStore) Recent(sessionID string, limit int) ([]TapeRecord, error) {
-	records, err := s.readAll(sessionID)
-	if err != nil {
-		return nil, err
-	}
-	if limit <= 0 || limit >= len(records) {
-		return records, nil
-	}
-	return records[len(records)-limit:], nil
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.recentLocked(sessionID, limit)
 }
 
 func (s *TapeStore) Search(sessionID, query string, limit int) ([]TapeRecord, error) {
-	records, err := s.readAll(sessionID)
-	if err != nil {
-		return nil, err
-	}
-
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	query = strings.ToLower(strings.TrimSpace(query))
 	if query == "" {
-		if limit <= 0 || limit >= len(records) {
-			return records, nil
-		}
-		return records[len(records)-limit:], nil
+		return s.recentLocked(sessionID, limit)
 	}
 
-	matches := make([]TapeRecord, 0, min(limit, len(records)))
-	for i := len(records) - 1; i >= 0; i-- {
-		b, _ := json.Marshal(records[i].Payload)
-		haystack := strings.ToLower(records[i].Kind + "\n" + string(b))
+	matches := make([]TapeRecord, 0, max(0, limit))
+	err := s.forEachRecordLocked(sessionID, func(rec TapeRecord) bool {
+		b, _ := json.Marshal(rec.Payload)
+		haystack := strings.ToLower(rec.Kind + "\n" + string(b))
 		if strings.Contains(haystack, query) {
-			matches = append(matches, records[i])
-			if limit > 0 && len(matches) >= limit {
-				break
+			if limit <= 0 {
+				matches = append(matches, rec)
+				return true
 			}
+			matches = pushTailRecord(matches, rec, limit)
 		}
-	}
-
-	// Keep chronological order in result.
-	for i, j := 0, len(matches)-1; i < j; i, j = i+1, j-1 {
-		matches[i], matches[j] = matches[j], matches[i]
+		return true
+	})
+	if err != nil {
+		return nil, err
 	}
 	return matches, nil
 }
 
 func (s *TapeStore) Anchors(sessionID string, limit int) ([]TapeRecord, error) {
-	records, err := s.readAll(sessionID)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	anchors := make([]TapeRecord, 0, max(0, limit))
+	err := s.forEachRecordLocked(sessionID, func(rec TapeRecord) bool {
+		if isAnchorRecord(rec) {
+			if limit <= 0 {
+				anchors = append(anchors, rec)
+				return true
+			}
+			anchors = pushTailRecord(anchors, rec, limit)
+		}
+		return true
+	})
 	if err != nil {
 		return nil, err
 	}
-	anchors := make([]TapeRecord, 0, len(records))
-	for _, rec := range records {
-		if isAnchorRecord(rec) {
-			anchors = append(anchors, rec)
-		}
-	}
-	if limit <= 0 || limit >= len(anchors) {
-		return anchors, nil
-	}
-	return anchors[len(anchors)-limit:], nil
+	return anchors, nil
 }
 
 func (s *TapeStore) Info(sessionID string) (TapeInfo, error) {
-	records, err := s.readAll(sessionID)
-	if err != nil {
-		return TapeInfo{}, err
-	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	info := TapeInfo{
-		Name:    sessionID,
-		Entries: len(records),
+		Name: sessionID,
 	}
 	lastAnchorIdx := -1
-	for idx, rec := range records {
+	idx := -1
+	err := s.forEachRecordLocked(sessionID, func(rec TapeRecord) bool {
+		idx++
+		info.Entries++
 		if !isAnchorRecord(rec) {
-			continue
+			return true
 		}
 		info.Anchors++
 		lastAnchorIdx = idx
 		if name := strings.TrimSpace(fmt.Sprintf("%v", rec.Payload["name"])); name != "" {
 			info.LastAnchor = name
 		}
+		return true
+	})
+	if err != nil {
+		return TapeInfo{}, err
 	}
 	if lastAnchorIdx >= 0 {
-		info.EntriesSinceLastAnchor = len(records) - lastAnchorIdx - 1
+		info.EntriesSinceLastAnchor = info.Entries - lastAnchorIdx - 1
 	}
 	return info, nil
 }
@@ -273,82 +287,116 @@ func (s *TapeStore) Reset(sessionID string, archive bool) (string, error) {
 		if err := os.Rename(path, archived); err != nil {
 			return "", err
 		}
-		s.tapeFileLocked(sessionID).reset()
 		return "tape archived and reset", nil
 	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return "", err
 	}
-	s.tapeFileLocked(sessionID).reset()
 	return "tape reset", nil
 }
 
-func (s *TapeStore) readAll(sessionID string) ([]TapeRecord, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	file := s.tapeFileLocked(sessionID)
-	path := s.filePath(sessionID)
-	info, err := os.Stat(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			file.reset()
-			return nil, nil
+func (s *TapeStore) recentLocked(sessionID string, limit int) ([]TapeRecord, error) {
+	records := make([]TapeRecord, 0, max(0, limit))
+	err := s.forEachRecordLocked(sessionID, func(rec TapeRecord) bool {
+		if limit <= 0 {
+			records = append(records, rec)
+			return true
 		}
+		records = pushTailRecord(records, rec, limit)
+		return true
+	})
+	if err != nil {
 		return nil, err
 	}
-	if info.Size() < file.offset {
-		// The tape file was truncated/replaced; cached entries are stale.
-		file.reset()
-	}
+	return records, nil
+}
 
+func pushTailRecord(records []TapeRecord, rec TapeRecord, limit int) []TapeRecord {
+	if limit <= 0 {
+		return append(records, rec)
+	}
+	if len(records) < limit {
+		return append(records, rec)
+	}
+	copy(records, records[1:])
+	records[len(records)-1] = rec
+	return records
+}
+
+func (s *TapeStore) forEachRecordLocked(sessionID string, visit func(TapeRecord) bool) error {
+	path := s.filePath(sessionID)
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			file.reset()
-			return nil, nil
+			return nil
 		}
-		return nil, err
+		return err
 	}
 	defer f.Close()
 
-	if _, err := f.Seek(file.offset, io.SeekStart); err != nil {
-		return nil, err
-	}
-
-	reader := bufio.NewReader(f)
-	for {
-		rawLine, readErr := reader.ReadBytes('\n')
-		if len(rawLine) > 0 {
-			file.offset += int64(len(rawLine))
-			line := bytes.TrimSpace(rawLine)
-			if len(line) > 0 {
-				var rec TapeRecord
-				if err := json.Unmarshal(line, &rec); err == nil {
-					file.records = append(file.records, rec)
-				}
-			}
-		}
-		if errors.Is(readErr, io.EOF) {
-			break
-		}
+	for line, readErr := range readJSONLLines(f) {
 		if readErr != nil {
-			return nil, readErr
+			return readErr
+		}
+		var rec TapeRecord
+		if err := json.Unmarshal(line, &rec); err != nil {
+			continue
+		}
+		if !visit(rec) {
+			return nil
 		}
 	}
-
-	out := make([]TapeRecord, len(file.records))
-	copy(out, file.records)
-	return out, nil
+	return nil
 }
 
-func (s *TapeStore) tapeFileLocked(sessionID string) *tapeFile {
-	if f, ok := s.files[sessionID]; ok {
-		return f
+func (s *TapeStore) hasAnchorStreamLocked(sessionID string) (bool, error) {
+	path := s.filePath(sessionID)
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
 	}
-	f := &tapeFile{}
-	s.files[sessionID] = f
-	return f
+	defer f.Close()
+
+	for line, readErr := range readJSONLLines(f) {
+		if readErr != nil {
+			return false, readErr
+		}
+		var rec TapeRecord
+		if err := json.Unmarshal(line, &rec); err != nil {
+			continue
+		}
+		if isAnchorRecord(rec) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func readJSONLLines(r io.Reader) iter.Seq2[[]byte, error] {
+	return func(yield func([]byte, error) bool) {
+		reader := bufio.NewReader(r)
+		for {
+			rawLine, err := reader.ReadBytes('\n')
+			if len(rawLine) > 0 {
+				line := bytes.TrimSpace(rawLine)
+				if len(line) > 0 {
+					if !yield(line, nil) {
+						return
+					}
+				}
+			}
+			if errors.Is(err, io.EOF) {
+				return
+			}
+			if err != nil {
+				yield(nil, err)
+				return
+			}
+		}
+	}
 }
 
 func (s *TapeStore) filePath(sessionID string) string {
@@ -501,28 +549,6 @@ func selectTapeMessages(records []TapeRecord) []*blades.Message {
 		}
 	}
 	return out
-}
-
-func selectRecordsAfterLastAnchor(records []TapeRecord) ([]TapeRecord, error) {
-	if len(records) == 0 {
-		return nil, errTapeAnchorNotFound
-	}
-	lastAnchorIdx := -1
-	for i := len(records) - 1; i >= 0; i-- {
-		if isAnchorRecord(records[i]) {
-			lastAnchorIdx = i
-			break
-		}
-	}
-	if lastAnchorIdx < 0 {
-		return nil, errTapeAnchorNotFound
-	}
-	if lastAnchorIdx+1 >= len(records) {
-		return nil, nil
-	}
-	out := make([]TapeRecord, len(records[lastAnchorIdx+1:]))
-	copy(out, records[lastAnchorIdx+1:])
-	return out, nil
 }
 
 func isAnchorRecord(rec TapeRecord) bool {
