@@ -16,6 +16,9 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 
 FROM debian:bookworm-slim
 
+ARG BUGO_UID=1000
+ARG BUGO_GID=1000
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
     ca-certificates \
@@ -60,6 +63,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     openssh-client \
     procps \
     ripgrep \
+    sudo \
     tini \
     tzdata \
     unzip \
@@ -68,7 +72,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     xdg-utils \
     xvfb \
     xz-utils \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid "${BUGO_GID}" bugo \
+    && useradd --uid "${BUGO_UID}" --gid "${BUGO_GID}" --create-home --shell /bin/bash bugo \
+    && usermod -aG sudo bugo \
+    && printf 'bugo ALL=(ALL) NOPASSWD:ALL\n' >/etc/sudoers.d/bugo \
+    && chmod 0440 /etc/sudoers.d/bugo \
+    && mkdir -p /app /data \
+    && chown -R bugo:bugo /app /data /home/bugo
 
 WORKDIR /app
 
@@ -76,6 +87,10 @@ COPY --from=builder /out/bugo /usr/local/bin/bugo
 COPY docker/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
+ENV HOME=/home/bugo
+ENV USER=bugo
+ENV LOGNAME=bugo
+ENV SHELL=/bin/bash
 ENV BUGO_HOME=/data/.bugo
 ENV DISPLAY=:99
 ENV BUGO_ENABLE_XVFB=1
@@ -83,6 +98,8 @@ ENV XVFB_RESOLUTION=1920x1080x24
 ENV XVFB_ARGS=
 
 VOLUME ["/data"]
+
+USER bugo
 
 ENTRYPOINT ["tini", "-g", "--", "/usr/local/bin/docker-entrypoint.sh"]
 CMD ["bugo"]

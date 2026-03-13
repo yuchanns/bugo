@@ -24,6 +24,7 @@ It is safer than running directly on the host because process/runtime boundaries
 The published image is intended to be agent-ready instead of a bare runtime.
 It includes common CLI tools (`git`, `curl`, `jq`, `ripgrep`, `less`, `openssh-client`), Node.js tooling (`node`, `npm`, `npx`/`npm exec`), and a preinstalled virtual X server stack.
 By default the container exports `DISPLAY=:99`, starts `Xvfb` before `bugo`, and keeps browser/runtime libraries available for visual automation workloads.
+The runtime user defaults to a regular `bugo` account instead of `root`; it still has passwordless `sudo`, so the agent can self-manage packages or escalate when needed.
 
 ```bash
 docker run -d --name bugo \
@@ -46,6 +47,12 @@ Virtual display knobs:
 - `BUGO_ENABLE_XVFB=0`: disable auto-started virtual display when you want to provide your own X server.
 - `XVFB_RESOLUTION=1920x1080x24`: override the default screen geometry/depth.
 - `XVFB_ARGS="-dpi 120"`: append extra `Xvfb` flags when needed.
+
+Container user knobs:
+
+- Build args `BUGO_UID` / `BUGO_GID`: default to `1000`, useful when matching host-mounted volume ownership.
+- The container starts as user `bugo`, but `sudo` does not require a password.
+- This improves non-root runtime ergonomics, but it is not a hard security boundary because passwordless `sudo` still grants full root inside the container.
 
 ## 2. Install (local binary)
 
