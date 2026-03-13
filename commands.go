@@ -79,12 +79,13 @@ func (a *App) handleCommand(ctx context.Context, inbox *sessionInbox, content st
 		Msg("session.message received command")
 
 	result, err := a.executeCommand(ctx, inbox, content)
+	threadID := threadIDFromState(inbox.session.State())
 	if err != nil {
 		log.Error().
 			Str("session_id", inbox.session.ID()).
 			Err(err).
 			Msg("session.command.error")
-		_ = a.sendText(ctx, inbox.chatID, "Error: "+err.Error())
+		_ = a.sendText(ctx, inbox.chatID, threadID, "Error: "+err.Error())
 		return
 	}
 	if strings.TrimSpace(result) == "" {
@@ -94,7 +95,7 @@ func (a *App) handleCommand(ctx context.Context, inbox *sessionInbox, content st
 		Str("session_id", inbox.session.ID()).
 		Str("content", log.PrettifyText(result)).
 		Msg("session.run.outbound")
-	_ = a.sendText(ctx, inbox.chatID, result)
+	_ = a.sendText(ctx, inbox.chatID, threadID, result)
 }
 
 func (a *App) executeCommand(ctx context.Context, inbox *sessionInbox, content string) (string, error) {

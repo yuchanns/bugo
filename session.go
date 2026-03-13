@@ -103,33 +103,16 @@ type sessionInbox struct {
 	mu          sync.Mutex
 }
 
-type telegramSessionUpdate struct {
-	MessageID int
-	ChatID    int64
-	Text      string
-	Type      string
-	SenderID  int64
-	Username  string
-	FullName  string
-	Date      int
-}
-
 type inboxHub struct {
 	sessions *SessionStore
 	mu       sync.Mutex
 	items    map[string]*sessionInbox
-	updates  map[string][]telegramSessionUpdate
-	waitCh   map[string]chan struct{}
-	waiters  map[string]int
 }
 
 func newInboxHub(sessions *SessionStore) *inboxHub {
 	return &inboxHub{
 		sessions: sessions,
 		items:    map[string]*sessionInbox{},
-		updates:  map[string][]telegramSessionUpdate{},
-		waitCh:   map[string]chan struct{}{},
-		waiters:  map[string]int{},
 	}
 }
 
@@ -153,104 +136,11 @@ func (h *inboxHub) Get(sessionID string, chatID int64) *sessionInbox {
 func (h *inboxHub) resetSession(sessionID string) bool {
 	h.mu.Lock()
 	inbox, ok := h.items[sessionID]
-	delete(h.updates, sessionID)
-	delete(h.waitCh, sessionID)
-	delete(h.waiters, sessionID)
 	h.mu.Unlock()
 	if !ok || inbox == nil {
 		return false
 	}
 	return inbox.resetRuntime()
-}
-
-func (h *inboxHub) pushUpdate(sessionID string, update telegramSessionUpdate) {
-	h.mu.Lock()
-	h.updates[sessionID] = append(h.updates[sessionID], update)
-	ch := h.getOrCreateWaitChLocked(sessionID)
-	h.mu.Unlock()
-	select {
-	case ch <- struct{}{}:
-	default:
-	}
-}
-
-func (h *inboxHub) waitForUpdate(sessionID string, timeout time.Duration) (telegramSessionUpdate, bool) {
-	if timeout <= 0 {
-		timeout = time.Minute
-	}
-	h.beginWait(sessionID)
-	defer h.endWait(sessionID)
-
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-
-	for {
-		if update, ok := h.popUpdate(sessionID); ok {
-			return update, true
-		}
-		ch := h.waitChannel(sessionID)
-		select {
-		case <-timer.C:
-			return telegramSessionUpdate{}, false
-		case <-ch:
-		}
-	}
-}
-
-func (h *inboxHub) popUpdate(sessionID string) (telegramSessionUpdate, bool) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	queue := h.updates[sessionID]
-	if len(queue) == 0 {
-		return telegramSessionUpdate{}, false
-	}
-	update := queue[0]
-	rest := queue[1:]
-	if len(rest) == 0 {
-		delete(h.updates, sessionID)
-	} else {
-		h.updates[sessionID] = rest
-	}
-	return update, true
-}
-
-func (h *inboxHub) waitChannel(sessionID string) chan struct{} {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.getOrCreateWaitChLocked(sessionID)
-}
-
-func (h *inboxHub) getOrCreateWaitChLocked(sessionID string) chan struct{} {
-	ch, ok := h.waitCh[sessionID]
-	if ok {
-		return ch
-	}
-	ch = make(chan struct{}, 1)
-	h.waitCh[sessionID] = ch
-	return ch
-}
-
-func (h *inboxHub) hasWaiter(sessionID string) bool {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.waiters[sessionID] > 0
-}
-
-func (h *inboxHub) beginWait(sessionID string) {
-	h.mu.Lock()
-	h.waiters[sessionID] = h.waiters[sessionID] + 1
-	h.mu.Unlock()
-}
-
-func (h *inboxHub) endWait(sessionID string) {
-	h.mu.Lock()
-	n := h.waiters[sessionID]
-	if n <= 1 {
-		delete(h.waiters, sessionID)
-	} else {
-		h.waiters[sessionID] = n - 1
-	}
-	h.mu.Unlock()
 }
 
 func (inbox *sessionInbox) resetRuntime() bool {

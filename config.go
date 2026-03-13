@@ -20,7 +20,6 @@ type Config struct {
 	TelegramWorkers    int
 	AllowChats         map[int64]struct{}
 	AllowFrom          map[string]struct{}
-	ProactiveResponse  bool
 	DebounceSeconds    int
 	MessageDelay       int
 	ActiveWindow       int
@@ -39,7 +38,6 @@ func LoadConfig() (Config, error) {
 		TelegramToken:      env("BUGO_TELEGRAM_TOKEN"),
 		TelegramProxy:      env("BUGO_TELEGRAM_PROXY"),
 		TelegramWorkers:    intEnv("BUGO_TELEGRAM_WORKERS", 4),
-		ProactiveResponse:  boolEnvAny([]string{"BUGO_PROACTIVE_RESPONSE"}, false),
 		DebounceSeconds:    intEnv("BUGO_DEBOUNCE_SECONDS", 1),
 		MessageDelay:       intEnv("BUGO_MESSAGE_DELAY_SECONDS", 10),
 		ActiveWindow:       intEnv("BUGO_ACTIVE_WINDOW_SECONDS", 60),
@@ -102,20 +100,6 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
-}
-
-func boolEnvAny(keys []string, defaultValue bool) bool {
-	for _, key := range keys {
-		raw := env(key)
-		if raw == "" {
-			continue
-		}
-		v, err := strconv.ParseBool(raw)
-		if err == nil {
-			return v
-		}
-	}
-	return defaultValue
 }
 
 func intEnv(key string, defaultValue int) int {

@@ -78,7 +78,6 @@ Optional:
 ```bash
 export BUGO_MODEL="gpt-4o-mini"
 export BUGO_API_BASE="https://openrouter.ai/api/v1"
-export BUGO_PROACTIVE_RESPONSE=false
 export BUGO_TELEGRAM_ALLOW_CHATS='["123456789"]'
 export BUGO_TELEGRAM_ALLOW_FROM='["123456789","your_username"]'
 export BUGO_BASH_ALLOW_ENV='["SSH_AUTH_SOCK","HTTP_PROXY","HTTPS_PROXY","NO_PROXY"]'
@@ -119,8 +118,7 @@ If an external skill has the same name as a built-in one, the external skill ove
 - Group chats are handled only when mention/reply conditions match.
 - Session key format: `telegram:<chat_id>`.
 - Inputs with `,` prefix go to local command channel.
-- `BUGO_PROACTIVE_RESPONSE=false`: agent text is auto-sent.
-- `BUGO_PROACTIVE_RESPONSE=true`: assistant text is not auto-sent (tool/skill should send explicitly).
+- Assistant replies are streamed back to Telegram draft messages and finalized as normal messages.
 
 Command examples:
 

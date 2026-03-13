@@ -306,15 +306,6 @@ func mergeSkills(base []skills.Skill, extra []skills.Skill) []skills.Skill {
 func (a *App) buildTools() ([]tools.Tool, error) {
 	allTools := make([]tools.Tool, 0, 24)
 
-	if err := addFuncTool(&allTools, "telegram_send", "Send a message to Telegram. If chat_id is omitted, use current session chat.", a.handleTelegramSendTool); err != nil {
-		return nil, err
-	}
-	if err := addFuncTool(&allTools, "telegram_edit", "Edit a Telegram message text. Prefer editing the previous message_id to update progress.", a.handleTelegramEditTool); err != nil {
-		return nil, err
-	}
-	if err := addFuncTool(&allTools, "telegram_get_update", "Wait for next user update in current Telegram session after asking a question.", a.handleTelegramGetUpdateTool); err != nil {
-		return nil, err
-	}
 	if err := addFuncTool(&allTools, "tape_recent", "Get latest tape records from current session.", a.handleTapeRecentTool); err != nil {
 		return nil, err
 	}
@@ -385,14 +376,6 @@ Use tape_handoff proactively to keep context compact:
 - If context-related instability appears, handoff first, then continue.
 - Avoid noisy handoffs: at most one handoff per user turn unless there is a clear phase change.
 </context_contract>
-<response_instruct>
-You are handling Telegram messages.
-If proactive response mode is enabled, you MUST call "telegram_send" or "telegram_edit" before finishing.
-When sending progress updates, prefer "telegram_edit" on the same message_id after an initial "telegram_send".
-After asking the user a question via "telegram_send"/"telegram_edit", you can call "telegram_get_update" to wait for reply.
-If proactive response mode is disabled, runtime can auto-send your assistant text.
-Session metadata is in state keys like "channel", "chat_id", "session_id".
-</response_instruct>
 `)
 }
 
@@ -431,7 +414,6 @@ func (a *App) Run(ctx context.Context) error {
 	}
 	log.Info().
 		Str("model", a.cfg.Model).
-		Bool("proactive", a.cfg.ProactiveResponse).
 		Msg("bugo.started")
 	if a.schedule != nil {
 		defer a.schedule.Close()
@@ -498,7 +480,7 @@ func (a *App) onUpdate(ctx context.Context, _ *bot.Bot, update *models.Update) {
 	inbox.session.SetState("session_id", sessionID)
 	inbox.session.SetState("channel", "telegram")
 	inbox.session.SetState("chat_id", msg.Chat.ID)
-	inbox.session.SetState("round_telegram_message_id", 0)
+	inbox.session.SetState("message_thread_id", msg.MessageThreadID)
 	if msg.From != nil {
 		inbox.session.SetState("sender_id", msg.From.ID)
 		if msg.From.Username != "" {
@@ -506,22 +488,6 @@ func (a *App) onUpdate(ctx context.Context, _ *bot.Bot, update *models.Update) {
 		}
 	}
 	isCommand := strings.HasPrefix(strings.TrimSpace(content), ",")
-	inbox.mu.Lock()
-	running := inbox.running
-	inbox.mu.Unlock()
-	if running && !isCommand && a.inboxes.hasWaiter(sessionID) {
-		a.inboxes.pushUpdate(sessionID, telegramSessionUpdate{
-			MessageID: msg.ID,
-			ChatID:    msg.Chat.ID,
-			Text:      content,
-			Type:      messageType(msg),
-			SenderID:  int64FromAny(senderID(msg)),
-			Username:  senderUsername(msg),
-			FullName:  senderFullName(msg),
-			Date:      msg.Date,
-		})
-		return
-	}
 
 	if isCommand {
 		a.handleCommand(ctx, inbox, content)
@@ -647,39 +613,32 @@ func (a *App) flushInbox(inbox *sessionInbox) {
 	prompt := strings.Join(inbox.pending, "\n")
 	chatID := inbox.chatID
 	session := inbox.session
-	session.SetState("round_telegram_message_id", 0)
 	inbox.pending = nil
 	inbox.running = true
 	inbox.mu.Unlock()
 
-	cancelTyping := a.startTyping(chatID)
-	response, err := a.runModelPrompt(session, prompt)
-	cancelTyping()
+	threadID := int(int64FromAny(session.State()["message_thread_id"]))
+	stopTyping := a.startTyping(chatID)
+	response, err := a.runModelPrompt(session, chatID, threadID, prompt)
+	stopTyping()
 
 	if err != nil {
 		log.Error().
 			Str("session_id", session.ID()).
 			Err(err).
 			Msg("session.run.error")
-		if sendErr := a.sendText(context.Background(), chatID, "Error: "+err.Error()); sendErr != nil {
+		if sendErr := a.sendText(context.Background(), chatID, threadID, "Error: "+err.Error()); sendErr != nil {
 			log.Error().
 				Str("session_id", session.ID()).
 				Int64("chat_id", chatID).
 				Err(sendErr).
 				Msg("session.run.outbound.error")
 		}
-	} else if !a.cfg.ProactiveResponse && strings.TrimSpace(response) != "" {
+	} else if strings.TrimSpace(response) != "" {
 		log.Info().
 			Str("session_id", session.ID()).
 			Str("content", log.PrettifyText(response)).
 			Msg("session.run.outbound")
-		if sendErr := a.sendText(context.Background(), chatID, response); sendErr != nil {
-			log.Error().
-				Str("session_id", session.ID()).
-				Int64("chat_id", chatID).
-				Err(sendErr).
-				Msg("session.run.outbound.error")
-		}
 	}
 
 	inbox.mu.Lock()
@@ -695,7 +654,7 @@ func (a *App) flushInbox(inbox *sessionInbox) {
 	inbox.mu.Unlock()
 }
 
-func (a *App) runModelPrompt(session *TapeSession, prompt string) (string, error) {
+func (a *App) runModelPrompt(session *TapeSession, chatID int64, threadID int, prompt string) (string, error) {
 	ctx := context.Background()
 	runner := a.currentRunner()
 	if runner == nil {
@@ -703,9 +662,11 @@ func (a *App) runModelPrompt(session *TapeSession, prompt string) (string, error
 	}
 
 	var (
-		deltaBuilder strings.Builder
-		finalText    string
+		streamer   = newTelegramDraftStreamer(a.bot, chatID, threadID)
+		streamText strings.Builder
+		finalText  string
 	)
+	defer streamer.Stop()
 
 	for out, err := range runner.RunStream(ctx, blades.UserMessage(prompt), blades.WithSession(session)) {
 		if err != nil {
@@ -719,23 +680,36 @@ func (a *App) runModelPrompt(session *TapeSession, prompt string) (string, error
 		}
 
 		text := out.Text()
-		if strings.TrimSpace(text) == "" {
+		if text == "" {
 			continue
 		}
 
 		switch out.Status {
 		case blades.StatusCompleted:
-			finalText = strings.TrimSpace(text)
+			finalText = text
 		case blades.StatusIncomplete, blades.StatusInProgress:
-			deltaBuilder.WriteString(text)
+			streamText.WriteString(text)
+			if err := streamer.Append(ctx, text); err != nil {
+				return "", err
+			}
 		}
 	}
-	if finalText != "" {
+
+	streamed := strings.TrimSpace(streamText.String())
+	if streamed == "" && finalText != "" {
+		if err := a.sendText(ctx, chatID, threadID, finalText); err != nil {
+			return "", err
+		}
 		return finalText, nil
 	}
-	streamText := strings.TrimSpace(deltaBuilder.String())
-	if streamText != "" {
-		return streamText, nil
+	if streamed != "" {
+		if err := streamer.Finalize(ctx, finalText); err != nil {
+			return "", err
+		}
+		if finalText != "" {
+			return finalText, nil
+		}
+		return streamed, nil
 	}
 	return "", nil
 }
@@ -760,7 +734,7 @@ func (a *App) startTyping(chatID int64) func() {
 	return cancel
 }
 
-func (a *App) sendText(ctx context.Context, chatID int64, text string) error {
+func (a *App) sendText(ctx context.Context, chatID int64, threadID int, text string) error {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return nil
@@ -768,8 +742,9 @@ func (a *App) sendText(ctx context.Context, chatID int64, text string) error {
 	parts := splitTextByRunes(text, 3500)
 	for _, part := range parts {
 		if _, err := a.bot.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID: chatID,
-			Text:   part,
+			ChatID:          chatID,
+			MessageThreadID: threadID,
+			Text:            part,
 		}); err != nil {
 			return err
 		}
@@ -818,164 +793,6 @@ func (a *App) isSenderAllowed(user *models.User) bool {
 		return ok
 	}
 	return false
-}
-
-type telegramSendInput struct {
-	ChatID int64  `json:"chat_id,omitempty"`
-	Text   string `json:"text"`
-}
-
-type telegramSendOutput struct {
-	Sent      bool `json:"sent"`
-	MessageID int  `json:"message_id,omitempty"`
-}
-
-func (a *App) handleTelegramSendTool(ctx context.Context, in telegramSendInput) (telegramSendOutput, error) {
-	chatID := in.ChatID
-	sessionID := ""
-	if chatID == 0 {
-		s, ok := blades.FromSessionContext(ctx)
-		if ok {
-			chatID = int64FromAny(s.State()["chat_id"])
-			sessionID = s.ID()
-		}
-	}
-	if chatID == 0 {
-		return telegramSendOutput{}, fmt.Errorf("chat_id is required")
-	}
-	if strings.TrimSpace(in.Text) == "" {
-		return telegramSendOutput{}, fmt.Errorf("text is required")
-	}
-	resp, err := a.bot.SendMessage(ctx, &bot.SendMessageParams{
-		ChatID: chatID,
-		Text:   in.Text,
-	})
-	if err != nil {
-		return telegramSendOutput{}, err
-	}
-	log.Info().
-		Str("session_id", sessionID).
-		Int64("chat_id", chatID).
-		Str("content", log.PrettifyText(in.Text)).
-		Msg("session.run.outbound")
-	if s, ok := blades.FromSessionContext(ctx); ok && s != nil {
-		s.SetState("round_telegram_message_id", resp.ID)
-		s.SetState("last_telegram_message_id", resp.ID)
-		s.SetState("last_telegram_chat_id", chatID)
-	}
-	return telegramSendOutput{Sent: true, MessageID: resp.ID}, nil
-}
-
-type telegramEditInput struct {
-	ChatID    int64  `json:"chat_id,omitempty"`
-	MessageID int    `json:"message_id,omitempty"`
-	Text      string `json:"text"`
-}
-
-type telegramEditOutput struct {
-	Edited    bool `json:"edited"`
-	MessageID int  `json:"message_id,omitempty"`
-}
-
-func (a *App) handleTelegramEditTool(ctx context.Context, in telegramEditInput) (telegramEditOutput, error) {
-	chatID := in.ChatID
-	messageID := in.MessageID
-	sessionID := ""
-	if s, ok := blades.FromSessionContext(ctx); ok && s != nil {
-		state := s.State()
-		sessionID = s.ID()
-		if chatID == 0 {
-			chatID = int64FromAny(state["chat_id"])
-		}
-		if messageID == 0 {
-			messageID = int(int64FromAny(state["round_telegram_message_id"]))
-		}
-	}
-	if chatID == 0 {
-		return telegramEditOutput{}, fmt.Errorf("chat_id is required")
-	}
-	if messageID <= 0 {
-		return telegramEditOutput{}, fmt.Errorf("message_id is required")
-	}
-	if strings.TrimSpace(in.Text) == "" {
-		return telegramEditOutput{}, fmt.Errorf("text is required")
-	}
-	resp, err := a.bot.EditMessageText(ctx, &bot.EditMessageTextParams{
-		ChatID:    chatID,
-		MessageID: messageID,
-		Text:      in.Text,
-	})
-	if err != nil {
-		return telegramEditOutput{}, err
-	}
-	log.Info().
-		Str("session_id", sessionID).
-		Int64("chat_id", chatID).
-		Int("message_id", messageID).
-		Str("content", log.PrettifyText(in.Text)).
-		Msg("session.run.outbound")
-	if s, ok := blades.FromSessionContext(ctx); ok && s != nil {
-		s.SetState("round_telegram_message_id", messageID)
-		s.SetState("last_telegram_message_id", messageID)
-		s.SetState("last_telegram_chat_id", chatID)
-	}
-	outID := messageID
-	if resp != nil && resp.ID != 0 {
-		outID = resp.ID
-	}
-	return telegramEditOutput{Edited: true, MessageID: outID}, nil
-}
-
-type telegramGetUpdateInput struct {
-	TimeoutSeconds int `json:"timeout_seconds,omitempty"`
-}
-
-type telegramGetUpdateItem struct {
-	MessageID int    `json:"message_id"`
-	ChatID    int64  `json:"chat_id"`
-	Text      string `json:"text"`
-	Type      string `json:"type"`
-	SenderID  int64  `json:"sender_id"`
-	Username  string `json:"username,omitempty"`
-	FullName  string `json:"full_name,omitempty"`
-	Date      int    `json:"date"`
-}
-
-type telegramGetUpdateOutput struct {
-	Received bool                   `json:"received"`
-	TimedOut bool                   `json:"timed_out,omitempty"`
-	Update   *telegramGetUpdateItem `json:"update,omitempty"`
-}
-
-func (a *App) handleTelegramGetUpdateTool(ctx context.Context, in telegramGetUpdateInput) (telegramGetUpdateOutput, error) {
-	sessionID, err := sessionIDFromContext(ctx)
-	if err != nil {
-		return telegramGetUpdateOutput{}, err
-	}
-	timeout := time.Duration(in.TimeoutSeconds) * time.Second
-	if timeout <= 0 {
-		timeout = time.Minute
-	}
-	if timeout > 10*time.Minute {
-		timeout = 10 * time.Minute
-	}
-	update, ok := a.inboxes.waitForUpdate(sessionID, timeout)
-	if !ok {
-		return telegramGetUpdateOutput{TimedOut: true}, nil
-	}
-	return telegramGetUpdateOutput{
-		Received: true,
-		Update: &telegramGetUpdateItem{
-			MessageID: update.MessageID,
-			ChatID:    update.ChatID,
-			Text:      update.Text,
-			Type:      update.Type,
-			SenderID:  update.SenderID,
-			Username:  update.Username,
-			FullName:  update.FullName,
-			Date:      update.Date,
-		},
-	}, nil
 }
 
 type tapeRecentInput struct {
@@ -1075,6 +892,13 @@ func int64FromAny(v any) int64 {
 	default:
 		return 0
 	}
+}
+
+func threadIDFromState(state map[string]any) int {
+	if state == nil {
+		return 0
+	}
+	return int(int64FromAny(state["message_thread_id"]))
 }
 
 func parseMessageContent(msg *models.Message) (string, map[string]any) {
