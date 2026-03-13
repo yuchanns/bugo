@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/go-kratos/blades"
 	bladestools "github.com/go-kratos/blades/tools"
+	log "github.com/yuchanns/bugo/internal/logging"
 )
 
 func addFuncTool[I, O any](
@@ -17,12 +19,47 @@ func addFuncTool[I, O any](
 	description string,
 	handler func(context.Context, I) (O, error),
 ) error {
-	tool, err := bladestools.NewFunc(name, description, handler)
+	wrapped := func(ctx context.Context, in I) (O, error) {
+		logToolCallStart(name, in)
+		start := time.Now()
+		out, err := handler(ctx, in)
+		elapsed := time.Since(start)
+		if err != nil {
+			logToolCallError(name, elapsed, err)
+			return out, err
+		}
+		logToolCallSuccess(name, elapsed)
+		return out, nil
+	}
+
+	tool, err := bladestools.NewFunc(name, description, wrapped)
 	if err != nil {
 		return err
 	}
 	*allTools = append(*allTools, tool)
 	return nil
+}
+
+func logToolCallStart(name string, input any) {
+	log.Info().
+		Str("name", name).
+		Str("params", log.RenderValue(input)).
+		Msg("tool.call.start")
+}
+
+func logToolCallSuccess(name string, elapsed time.Duration) {
+	log.Info().
+		Str("name", name).
+		Float64("elapsed_ms", float64(elapsed.Microseconds())/1000.0).
+		Msg("tool.call.success")
+}
+
+func logToolCallError(name string, elapsed time.Duration, err error) {
+	log.Error().
+		Str("name", name).
+		Float64("elapsed_ms", float64(elapsed.Microseconds())/1000.0).
+		Err(err).
+		Msg("tool.call.error")
 }
 
 type bashToolInput struct {

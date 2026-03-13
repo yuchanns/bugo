@@ -2,12 +2,12 @@ package main
 
 import (
 	"context"
-	"log"
 	"maps"
 	"sync"
 	"time"
 
 	"github.com/go-kratos/blades"
+	log "github.com/yuchanns/bugo/internal/logging"
 )
 
 type TapeSession struct {
@@ -48,7 +48,10 @@ func (s *TapeSession) SetState(key string, value any) {
 func (s *TapeSession) History() []*blades.Message {
 	history, err := s.tapes.HistoryMessages(s.id)
 	if err != nil {
-		log.Printf("load session history failed session=%s err=%v", s.id, err)
+		log.Error().
+			Str("session_id", s.id).
+			Err(err).
+			Msg("session.history.load.failed")
 		return nil
 	}
 	return history

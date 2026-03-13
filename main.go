@@ -2,27 +2,30 @@ package main
 
 import (
 	"context"
-	"log"
 	"os"
 	"os/signal"
 	"syscall"
+
+	log "github.com/yuchanns/bugo/internal/logging"
 )
 
 func main() {
+	log.Configure()
+
 	cfg, err := LoadConfig()
 	if err != nil {
-		log.Fatalf("load config: %v", err)
+		log.Fatal().Err(err).Msg("config.load.failed")
 	}
 
 	app, err := NewApp(cfg)
 	if err != nil {
-		log.Fatalf("build app: %v", err)
+		log.Fatal().Err(err).Msg("app.build.failed")
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	if err := app.Run(ctx); err != nil {
-		log.Fatalf("run app: %v", err)
+		log.Fatal().Err(err).Msg("app.run.failed")
 	}
 }

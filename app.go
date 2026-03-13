@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -23,6 +22,7 @@ import (
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 	"github.com/openai/openai-go/v3/option"
+	log "github.com/yuchanns/bugo/internal/logging"
 )
 
 type App struct {
@@ -193,7 +193,12 @@ type openAIResponseBodyLogger struct {
 func (r *openAIResponseBodyLogger) Read(p []byte) (int, error) {
 	n, err := r.body.Read(p)
 	if r.shouldLog && n > 0 {
-		log.Printf("openai non-2xx response chunk: method=%s url=%s status=%d chunk=%s", r.method, r.url, r.status, string(p[:n]))
+		log.Warn().
+			Str("method", r.method).
+			Str("url", r.url).
+			Int("status", r.status).
+			Str("chunk", log.PrettifyText(string(p[:n]))).
+			Msg("openai.response.non_2xx")
 	}
 	return n, err
 }
@@ -232,7 +237,11 @@ func (a *App) loadSkills() ([]skills.Skill, error) {
 	a.agentMu.Lock()
 	a.skills = merged
 	a.agentMu.Unlock()
-	log.Printf("loaded skills: builtin=%d external=%d merged=%d", len(builtin), len(external), len(merged))
+	log.Info().
+		Int("builtin", len(builtin)).
+		Int("external", len(external)).
+		Int("merged", len(merged)).
+		Msg("skills.loaded")
 	return merged, nil
 }
 
@@ -392,6 +401,11 @@ func (a *App) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	log.Info().
+		Int("allow_users_count", len(a.cfg.AllowFrom)).
+		Int("allow_chats_count", len(a.cfg.AllowChats)).
+		Bool("proxy_enabled", strings.TrimSpace(a.cfg.TelegramProxy) != "").
+		Msg("telegram.start")
 
 	opts := []bot.Option{
 		bot.WithDefaultHandler(a.onUpdate),
@@ -410,13 +424,21 @@ func (a *App) Run(ctx context.Context) error {
 	a.bot = botClient
 	a.botUser, _ = botClient.GetMe(ctx)
 	if a.botUser != nil {
-		log.Printf("telegram bot ready: id=%d username=%s", a.botUser.ID, a.botUser.Username)
+		log.Info().
+			Int64("id", a.botUser.ID).
+			Str("username", a.botUser.Username).
+			Msg("telegram.bot.ready")
 	}
-	log.Printf("bugo started: model=%s proactive=%v", a.cfg.Model, a.cfg.ProactiveResponse)
+	log.Info().
+		Str("model", a.cfg.Model).
+		Bool("proactive", a.cfg.ProactiveResponse).
+		Msg("bugo.started")
 	if a.schedule != nil {
 		defer a.schedule.Close()
 	}
+	log.Info().Msg("telegram.start polling")
 	botClient.Start(ctx)
+	log.Info().Msg("telegram.stopped")
 	return nil
 }
 
@@ -508,7 +530,7 @@ func (a *App) onUpdate(ctx context.Context, _ *bot.Bot, update *models.Update) {
 
 	mentioned := a.isMentioned(msg, content)
 	prompt := a.buildPromptPayload(msg, content, media)
-	a.enqueuePrompt(inbox, prompt, mentioned)
+	a.enqueuePrompt(inbox, prompt, content, mentioned)
 }
 
 func (a *App) buildPromptPayload(msg *models.Message, content string, media map[string]any) string {
@@ -573,13 +595,17 @@ func (a *App) isMentioned(msg *models.Message, content string) bool {
 	}
 }
 
-func (a *App) enqueuePrompt(inbox *sessionInbox, prompt string, mentioned bool) {
+func (a *App) enqueuePrompt(inbox *sessionInbox, prompt string, content string, mentioned bool) {
 	now := time.Now()
 	inbox.mu.Lock()
 	defer inbox.mu.Unlock()
 
 	if !mentioned {
 		if inbox.lastMention.IsZero() || now.Sub(inbox.lastMention) > time.Duration(a.cfg.ActiveWindow)*time.Second {
+			log.Info().
+				Str("session_id", inbox.session.ID()).
+				Str("content", log.PrettifyText(content)).
+				Msg("session.message received ignored")
 			return
 		}
 	}
@@ -587,8 +613,17 @@ func (a *App) enqueuePrompt(inbox *sessionInbox, prompt string, mentioned bool) 
 	inbox.pending = append(inbox.pending, prompt)
 	timeout := time.Duration(a.cfg.MessageDelay) * time.Second
 	if mentioned {
+		log.Info().
+			Str("session_id", inbox.session.ID()).
+			Str("content", log.PrettifyText(content)).
+			Msg("session.message received active")
 		inbox.lastMention = now
 		timeout = time.Duration(a.cfg.DebounceSeconds) * time.Second
+	} else {
+		log.Info().
+			Str("session_id", inbox.session.ID()).
+			Str("message", log.PrettifyText(content)).
+			Msg("session.receive followup")
 	}
 
 	if inbox.timer != nil {
@@ -622,13 +657,28 @@ func (a *App) flushInbox(inbox *sessionInbox) {
 	cancelTyping()
 
 	if err != nil {
-		log.Printf("run prompt error session=%s err=%v", session.ID(), err)
+		log.Error().
+			Str("session_id", session.ID()).
+			Err(err).
+			Msg("session.run.error")
 		if sendErr := a.sendText(context.Background(), chatID, "Error: "+err.Error()); sendErr != nil {
-			log.Printf("send error message failed session=%s chat_id=%d err=%v", session.ID(), chatID, sendErr)
+			log.Error().
+				Str("session_id", session.ID()).
+				Int64("chat_id", chatID).
+				Err(sendErr).
+				Msg("session.run.outbound.error")
 		}
 	} else if !a.cfg.ProactiveResponse && strings.TrimSpace(response) != "" {
+		log.Info().
+			Str("session_id", session.ID()).
+			Str("content", log.PrettifyText(response)).
+			Msg("session.run.outbound")
 		if sendErr := a.sendText(context.Background(), chatID, response); sendErr != nil {
-			log.Printf("send assistant response failed session=%s chat_id=%d err=%v", session.ID(), chatID, sendErr)
+			log.Error().
+				Str("session_id", session.ID()).
+				Int64("chat_id", chatID).
+				Err(sendErr).
+				Msg("session.run.outbound.error")
 		}
 	}
 
@@ -782,10 +832,12 @@ type telegramSendOutput struct {
 
 func (a *App) handleTelegramSendTool(ctx context.Context, in telegramSendInput) (telegramSendOutput, error) {
 	chatID := in.ChatID
+	sessionID := ""
 	if chatID == 0 {
 		s, ok := blades.FromSessionContext(ctx)
 		if ok {
 			chatID = int64FromAny(s.State()["chat_id"])
+			sessionID = s.ID()
 		}
 	}
 	if chatID == 0 {
@@ -801,6 +853,11 @@ func (a *App) handleTelegramSendTool(ctx context.Context, in telegramSendInput) 
 	if err != nil {
 		return telegramSendOutput{}, err
 	}
+	log.Info().
+		Str("session_id", sessionID).
+		Int64("chat_id", chatID).
+		Str("content", log.PrettifyText(in.Text)).
+		Msg("session.run.outbound")
 	if s, ok := blades.FromSessionContext(ctx); ok && s != nil {
 		s.SetState("round_telegram_message_id", resp.ID)
 		s.SetState("last_telegram_message_id", resp.ID)
@@ -823,8 +880,10 @@ type telegramEditOutput struct {
 func (a *App) handleTelegramEditTool(ctx context.Context, in telegramEditInput) (telegramEditOutput, error) {
 	chatID := in.ChatID
 	messageID := in.MessageID
+	sessionID := ""
 	if s, ok := blades.FromSessionContext(ctx); ok && s != nil {
 		state := s.State()
+		sessionID = s.ID()
 		if chatID == 0 {
 			chatID = int64FromAny(state["chat_id"])
 		}
@@ -849,6 +908,12 @@ func (a *App) handleTelegramEditTool(ctx context.Context, in telegramEditInput) 
 	if err != nil {
 		return telegramEditOutput{}, err
 	}
+	log.Info().
+		Str("session_id", sessionID).
+		Int64("chat_id", chatID).
+		Int("message_id", messageID).
+		Str("content", log.PrettifyText(in.Text)).
+		Msg("session.run.outbound")
 	if s, ok := blades.FromSessionContext(ctx); ok && s != nil {
 		s.SetState("round_telegram_message_id", messageID)
 		s.SetState("last_telegram_message_id", messageID)

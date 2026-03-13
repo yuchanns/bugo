@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	log "github.com/yuchanns/bugo/internal/logging"
 )
 
 type commandSpec struct {
@@ -67,18 +69,31 @@ func (a *App) handleScheduledMessage(sessionID string, chatID int64, message str
 		a.handleCommand(context.Background(), inbox, message)
 		return
 	}
-	a.enqueuePrompt(inbox, message, true)
+	a.enqueuePrompt(inbox, message, message, true)
 }
 
 func (a *App) handleCommand(ctx context.Context, inbox *sessionInbox, content string) {
+	log.Info().
+		Str("session_id", inbox.session.ID()).
+		Str("content", log.PrettifyText(content)).
+		Msg("session.message received command")
+
 	result, err := a.executeCommand(ctx, inbox, content)
 	if err != nil {
+		log.Error().
+			Str("session_id", inbox.session.ID()).
+			Err(err).
+			Msg("session.command.error")
 		_ = a.sendText(ctx, inbox.chatID, "Error: "+err.Error())
 		return
 	}
 	if strings.TrimSpace(result) == "" {
 		return
 	}
+	log.Info().
+		Str("session_id", inbox.session.ID()).
+		Str("content", log.PrettifyText(result)).
+		Msg("session.run.outbound")
 	_ = a.sendText(ctx, inbox.chatID, result)
 }
 

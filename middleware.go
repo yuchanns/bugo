@@ -3,12 +3,12 @@ package main
 import (
 	"context"
 	"errors"
-	"log"
 	"strings"
 
 	"github.com/go-kratos/blades"
 	bladestools "github.com/go-kratos/blades/tools"
 	"github.com/google/jsonschema-go/jsonschema"
+	log "github.com/yuchanns/bugo/internal/logging"
 )
 
 func tapeContextMiddleware(tapes *TapeStore) blades.Middleware {
@@ -19,13 +19,19 @@ func tapeContextMiddleware(tapes *TapeStore) blades.Middleware {
 			}
 			sessionID := invocation.Session.ID()
 			if err := tapes.EnsureBootstrapAnchor(sessionID); err != nil {
-				log.Printf("ensure tape bootstrap anchor failed session=%s err=%v", sessionID, err)
+				log.Error().
+					Str("session_id", sessionID).
+					Err(err).
+					Msg("tape.bootstrap.ensure.failed")
 				return next.Handle(ctx, invocation)
 			}
 			history, err := tapes.HistoryMessages(sessionID)
 			if err != nil {
 				if !errors.Is(err, errTapeAnchorNotFound) {
-					log.Printf("load tape context failed session=%s err=%v", sessionID, err)
+					log.Error().
+						Str("session_id", sessionID).
+						Err(err).
+						Msg("tape.context.load.failed")
 				}
 				return next.Handle(ctx, invocation)
 			}
