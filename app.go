@@ -369,12 +369,23 @@ func (a *App) systemInstruction() string {
 9. Please continuously maintain "write_todos" and update task progress in time during the task.
 </runtime_contract>
 <context_contract>
-Excessively long context may cause model call failures. In this case, you SHOULD first use tape_handoff tool to shorten the retrieved history.
-Use tape_handoff proactively to keep context compact:
-- Create a handoff after finishing a meaningful subtask or decision point.
-- Create a handoff before long multi-tool workflows.
-- If context-related instability appears, handoff first, then continue.
-- Avoid noisy handoffs: at most one handoff per user turn unless there is a clear phase change.
+Treat the current user message as your starting point.
+
+Session memory is available through tape tools.
+Only a small window of recent session history may already be present.
+When prior decisions, user preferences, unfinished work, or earlier tool results may affect correctness, retrieve the relevant memory before proceeding.
+
+Retrieval policy:
+- Use tape_recent for the latest working context.
+- Use tape_search for specific facts, decisions, or keywords.
+- Use tape_anchors or tape_info to orient yourself before deeper retrieval.
+- Do not retrieve memory when the task can be completed correctly from the current turn alone.
+- After retrieval, keep only the relevant details in working context.
+
+Memory maintenance:
+- Use tape_handoff to store a compact summary after a meaningful milestone, decision, or partial completion.
+- Use tape_handoff before long or multi-step work when a concise checkpoint would help future continuity.
+- Avoid noisy handoffs. Do not create one for every turn.
 </context_contract>
 `)
 }
@@ -525,7 +536,12 @@ func (a *App) buildPromptPayload(msg *models.Message, content string, media map[
 	if err != nil {
 		return content
 	}
-	return string(b)
+	return strings.TrimSpace(`
+<input_contract>
+This is the latest external user message with its metadata.
+Use tape tools if additional session memory is needed.
+</input_contract>
+` + "\n" + string(b))
 }
 
 func (a *App) isMentioned(msg *models.Message, content string) bool {

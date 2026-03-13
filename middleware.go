@@ -11,6 +11,8 @@ import (
 	log "github.com/yuchanns/bugo/internal/logging"
 )
 
+const tapeContextMessageLimit = 10
+
 func tapeContextMiddleware(tapes *TapeStore) blades.Middleware {
 	return func(next blades.Handler) blades.Handler {
 		return blades.HandleFunc(func(ctx context.Context, invocation *blades.Invocation) blades.Generator[*blades.Message, error] {
@@ -45,11 +47,22 @@ func tapeContextMiddleware(tapes *TapeStore) blades.Middleware {
 				}
 				history = filtered
 			}
+			history = tailMessages(history, tapeContextMessageLimit)
+			if len(history) == 0 {
+				return next.Handle(ctx, invocation)
+			}
 			cloned := invocation.Clone()
 			cloned.History = history
 			return next.Handle(ctx, cloned)
 		})
 	}
+}
+
+func tailMessages(history []*blades.Message, limit int) []*blades.Message {
+	if limit <= 0 || len(history) <= limit {
+		return history
+	}
+	return history[len(history)-limit:]
 }
 
 // patchToolSchemas patches tool input schemas for gateways that reject
