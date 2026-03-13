@@ -21,6 +21,10 @@ Current scope includes:
 Container deployment is recommended for production usage.
 It is safer than running directly on the host because process/runtime boundaries are isolated and writable paths are explicit.
 
+The published image is intended to be agent-ready instead of a bare runtime.
+It includes common CLI tools (`git`, `curl`, `jq`, `ripgrep`, `less`, `openssh-client`), Node.js tooling (`node`, `npm`, `npx`/`npm exec`), and a preinstalled virtual X server stack.
+By default the container exports `DISPLAY=:99`, starts `Xvfb` before `bugo`, and keeps browser/runtime libraries available for visual automation workloads.
+
 ```bash
 docker run -d --name bugo \
   -e BUGO_TELEGRAM_TOKEN="123456:xxxx" \
@@ -35,6 +39,13 @@ Optional hardening:
 - Use a pinned image tag instead of `latest`.
 - Use `--restart unless-stopped`.
 - Mount only the data directory you need.
+
+Virtual display knobs:
+
+- `DISPLAY`: defaults to `:99`.
+- `BUGO_ENABLE_XVFB=0`: disable auto-started virtual display when you want to provide your own X server.
+- `XVFB_RESOLUTION=1920x1080x24`: override the default screen geometry/depth.
+- `XVFB_ARGS="-dpi 120"`: append extra `Xvfb` flags when needed.
 
 ## 2. Install (local binary)
 
@@ -72,7 +83,8 @@ Notes:
 
 - If `OPENROUTER_API_KEY` is set and `BUGO_API_BASE` is empty, `BUGO_API_BASE` defaults to `https://openrouter.ai/api/v1`.
 - `BUGO_TELEGRAM_ALLOW_CHATS` and `BUGO_TELEGRAM_ALLOW_FROM` accept either JSON array or comma-separated values.
-- `BUGO_BASH_ALLOW_ENV` adds env names to the shell-tool inherit whitelist (JSON array or comma-separated).
+- `BUGO_BASH_ALLOW_ENV` appends env names to the shell-tool inherit whitelist (JSON array or comma-separated).
+- Default inherited shell env includes `PATH`, locale/time vars, and display-related vars such as `DISPLAY`, `XAUTHORITY`, and `XDG_RUNTIME_DIR`.
 - `BUGO_WORKDIR` defaults to the current working directory at startup.
 - History context is selected from entries after the latest tape anchor.
 

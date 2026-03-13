@@ -565,7 +565,7 @@ func (a *App) minimalShellEnv() []string {
 }
 
 func (a *App) minimalShellEnvMap() map[string]string {
-	keys := []string{"PATH", "LANG", "LC_ALL", "HOME", "TMPDIR", "TZ"}
+	keys := append([]string(nil), defaultShellEnvKeys...)
 	if len(a.cfg.BashAllowEnv) > 0 {
 		keys = append(keys, a.cfg.BashAllowEnv...)
 	}
@@ -583,6 +583,19 @@ func (a *App) minimalShellEnvMap() map[string]string {
 		}
 	}
 	return env
+}
+
+var defaultShellEnvKeys = []string{
+	"PATH",
+	"LANG",
+	"LC_ALL",
+	"HOME",
+	"TMPDIR",
+	"TZ",
+	"DISPLAY",
+	"WAYLAND_DISPLAY",
+	"XAUTHORITY",
+	"XDG_RUNTIME_DIR",
 }
 
 func (a *App) resolveWorkspacePath(raw string) (string, error) {
