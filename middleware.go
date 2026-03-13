@@ -3,15 +3,56 @@ package main
 import (
 	"context"
 	"errors"
+	"net"
+	"net/http"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/go-kratos/blades"
+	bladesmiddleware "github.com/go-kratos/blades/middleware"
 	bladestools "github.com/go-kratos/blades/tools"
+	kitretry "github.com/go-kratos/kit/retry"
 	"github.com/google/jsonschema-go/jsonschema"
+	"github.com/openai/openai-go/v3"
 	log "github.com/yuchanns/bugo/internal/logging"
 )
 
 const tapeContextMessageLimit = 10
+
+func agentRetryMiddleware() blades.Middleware {
+	return bladesmiddleware.Retry(
+		2,
+		kitretry.WithBaseDelay(300*time.Millisecond),
+		kitretry.WithMaxDelay(2*time.Second),
+		kitretry.WithRetryable(isRetryableAgentError),
+	)
+}
+
+func isRetryableAgentError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var apiErr *openai.Error
+	if errors.As(err, &apiErr) {
+		return apiErr.StatusCode == http.StatusRequestTimeout ||
+			apiErr.StatusCode == http.StatusConflict ||
+			apiErr.StatusCode == http.StatusTooManyRequests ||
+			apiErr.StatusCode >= http.StatusInternalServerError
+	}
+
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return netErr.Timeout() || netErr.Temporary()
+	}
+
+	return errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.Is(err, syscall.EHOSTUNREACH) ||
+		errors.Is(err, syscall.ENETUNREACH)
+}
 
 func tapeContextMiddleware(tapes *TapeStore) blades.Middleware {
 	return func(next blades.Handler) blades.Handler {
