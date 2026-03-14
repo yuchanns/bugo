@@ -94,13 +94,15 @@ func (s *SessionStore) Get(sessionID string) *TapeSession {
 }
 
 type sessionInbox struct {
-	session     *TapeSession
-	chatID      int64
-	lastMention time.Time
-	pending     []string
-	timer       *time.Timer
-	running     bool
-	mu          sync.Mutex
+	session        *TapeSession
+	chatID         int64
+	lastMention    time.Time
+	pending        []string
+	interrupts     []string
+	segmentVersion int
+	timer          *time.Timer
+	running        bool
+	mu             sync.Mutex
 }
 
 type inboxHub struct {
@@ -133,6 +135,12 @@ func (h *inboxHub) Get(sessionID string, chatID int64) *sessionInbox {
 	return created
 }
 
+func (h *inboxHub) Find(sessionID string) *sessionInbox {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.items[sessionID]
+}
+
 func (h *inboxHub) resetSession(sessionID string) bool {
 	h.mu.Lock()
 	inbox, ok := h.items[sessionID]
@@ -152,6 +160,44 @@ func (inbox *sessionInbox) resetRuntime() bool {
 		inbox.timer = nil
 	}
 	inbox.pending = nil
+	inbox.interrupts = nil
+	inbox.segmentVersion = 0
 	inbox.lastMention = time.Time{}
 	return false
+}
+
+func (inbox *sessionInbox) enqueueInterrupt(prompt string) {
+	inbox.mu.Lock()
+	defer inbox.mu.Unlock()
+	inbox.interrupts = append(inbox.interrupts, prompt)
+}
+
+func (inbox *sessionInbox) consumeInterrupts() ([]string, int) {
+	inbox.mu.Lock()
+	defer inbox.mu.Unlock()
+	if len(inbox.interrupts) == 0 {
+		return nil, inbox.segmentVersion
+	}
+	out := append([]string(nil), inbox.interrupts...)
+	inbox.interrupts = nil
+	inbox.segmentVersion++
+	return out, inbox.segmentVersion
+}
+
+func (inbox *sessionInbox) segment() int {
+	inbox.mu.Lock()
+	defer inbox.mu.Unlock()
+	return inbox.segmentVersion
+}
+
+func (inbox *sessionInbox) drainInterruptsToPending() int {
+	inbox.mu.Lock()
+	defer inbox.mu.Unlock()
+	if len(inbox.interrupts) == 0 {
+		return 0
+	}
+	inbox.pending = append(inbox.pending, inbox.interrupts...)
+	drained := len(inbox.interrupts)
+	inbox.interrupts = nil
+	return drained
 }

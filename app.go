@@ -120,6 +120,7 @@ func (a *App) buildAgent() (blades.Agent, error) {
 		},
 	}
 	model := openai.NewModel(a.cfg.Model, modelConfig)
+	model = newModel(model, a.inboxes)
 
 	baseTools, err := a.buildTools()
 	if err != nil {
@@ -582,10 +583,10 @@ func (a *App) isMentioned(msg *models.Message, content string) bool {
 func (a *App) enqueuePrompt(inbox *sessionInbox, prompt string, content string, mentioned bool) {
 	now := time.Now()
 	inbox.mu.Lock()
-	defer inbox.mu.Unlock()
 
 	if !mentioned {
 		if inbox.lastMention.IsZero() || now.Sub(inbox.lastMention) > time.Duration(a.cfg.ActiveWindow)*time.Second {
+			inbox.mu.Unlock()
 			log.Info().
 				Str("session_id", inbox.session.ID()).
 				Str("content", log.PrettifyText(content)).
@@ -594,7 +595,6 @@ func (a *App) enqueuePrompt(inbox *sessionInbox, prompt string, content string, 
 		}
 	}
 
-	inbox.pending = append(inbox.pending, prompt)
 	timeout := time.Duration(a.cfg.MessageDelay) * time.Second
 	if mentioned {
 		log.Info().
@@ -610,12 +610,23 @@ func (a *App) enqueuePrompt(inbox *sessionInbox, prompt string, content string, 
 			Msg("session.receive followup")
 	}
 
+	if inbox.running {
+		inbox.interrupts = append(inbox.interrupts, prompt)
+		inbox.mu.Unlock()
+		log.Info().
+			Str("session_id", inbox.session.ID()).
+			Msg("session.interrupt.queued")
+		return
+	}
+
+	inbox.pending = append(inbox.pending, prompt)
 	if inbox.timer != nil {
 		inbox.timer.Stop()
 	}
 	inbox.timer = time.AfterFunc(timeout, func() {
 		a.flushInbox(inbox)
 	})
+	inbox.mu.Unlock()
 }
 
 func (a *App) flushInbox(inbox *sessionInbox) {
@@ -637,7 +648,7 @@ func (a *App) flushInbox(inbox *sessionInbox) {
 
 	threadID := int(int64FromAny(session.State()["message_thread_id"]))
 	stopTyping := a.startTyping(chatID)
-	response, err := a.runModelPrompt(session, chatID, threadID, prompt)
+	response, err := a.runModelPrompt(inbox, session, chatID, threadID, prompt)
 	stopTyping()
 
 	if err != nil {
@@ -661,18 +672,28 @@ func (a *App) flushInbox(inbox *sessionInbox) {
 
 	inbox.mu.Lock()
 	inbox.running = false
+	drainedInterrupts := 0
+	if len(inbox.interrupts) > 0 {
+		inbox.pending = append(inbox.pending, inbox.interrupts...)
+		drainedInterrupts = len(inbox.interrupts)
+		inbox.interrupts = nil
+	}
 	if len(inbox.pending) > 0 {
 		if inbox.timer != nil {
 			inbox.timer.Stop()
 		}
-		inbox.timer = time.AfterFunc(time.Duration(a.cfg.MessageDelay)*time.Second, func() {
+		delay := time.Duration(a.cfg.MessageDelay) * time.Second
+		if drainedInterrupts > 0 {
+			delay = time.Duration(a.cfg.DebounceSeconds) * time.Second
+		}
+		inbox.timer = time.AfterFunc(delay, func() {
 			a.flushInbox(inbox)
 		})
 	}
 	inbox.mu.Unlock()
 }
 
-func (a *App) runModelPrompt(session *TapeSession, chatID int64, threadID int, prompt string) (string, error) {
+func (a *App) runModelPrompt(inbox *sessionInbox, session *TapeSession, chatID int64, threadID int, prompt string) (string, error) {
 	ctx := context.Background()
 	runner := a.currentRunner()
 	if runner == nil {
@@ -680,14 +701,26 @@ func (a *App) runModelPrompt(session *TapeSession, chatID int64, threadID int, p
 	}
 
 	var (
-		streamer   = newTelegramDraftStreamer(a.bot, chatID, threadID)
-		streamText strings.Builder
-		finalText  string
+		streamer       = newTelegramDraftStreamer(a.bot, chatID, threadID)
+		segmentStream  strings.Builder
+		segmentFinal   string
+		allOutput      strings.Builder
+		segmentVersion = inbox.segment()
 	)
 	defer streamer.Stop()
 
 	for out, err := range runner.RunStream(ctx, blades.UserMessage(prompt), blades.WithSession(session)) {
 		if err != nil {
+			segmentText, finalizeErr := finalizeAssistantSegment(ctx, streamer, &segmentStream, segmentFinal)
+			if finalizeErr != nil {
+				return "", finalizeErr
+			}
+			if strings.TrimSpace(segmentText) != "" {
+				if allOutput.Len() > 0 {
+					allOutput.WriteString("\n\n")
+				}
+				allOutput.WriteString(strings.TrimSpace(segmentText))
+			}
 			return "", err
 		}
 		if out == nil {
@@ -697,6 +730,25 @@ func (a *App) runModelPrompt(session *TapeSession, chatID int64, threadID int, p
 			continue
 		}
 
+		currentVersion := inbox.segment()
+		if currentVersion != segmentVersion {
+			segmentText, finalizeErr := finalizeAssistantSegment(ctx, streamer, &segmentStream, segmentFinal)
+			if finalizeErr != nil {
+				return "", finalizeErr
+			}
+			if strings.TrimSpace(segmentText) != "" {
+				if allOutput.Len() > 0 {
+					allOutput.WriteString("\n\n")
+				}
+				allOutput.WriteString(strings.TrimSpace(segmentText))
+			}
+			streamer.Stop()
+			streamer = newTelegramDraftStreamer(a.bot, chatID, threadID)
+			segmentStream.Reset()
+			segmentFinal = ""
+			segmentVersion = currentVersion
+		}
+
 		text := out.Text()
 		if text == "" {
 			continue
@@ -704,32 +756,46 @@ func (a *App) runModelPrompt(session *TapeSession, chatID int64, threadID int, p
 
 		switch out.Status {
 		case blades.StatusCompleted:
-			finalText = text
+			segmentFinal = text
 		case blades.StatusIncomplete, blades.StatusInProgress:
-			streamText.WriteString(text)
+			segmentStream.WriteString(text)
 			if err := streamer.Append(ctx, text); err != nil {
 				return "", err
 			}
 		}
 	}
 
-	streamed := strings.TrimSpace(streamText.String())
-	if streamed == "" && finalText != "" {
-		if err := a.sendText(ctx, chatID, threadID, finalText); err != nil {
-			return "", err
-		}
-		return finalText, nil
+	segmentText, err := finalizeAssistantSegment(ctx, streamer, &segmentStream, segmentFinal)
+	if err != nil {
+		return "", err
 	}
-	if streamed != "" {
-		if err := streamer.Finalize(ctx, finalText); err != nil {
-			return "", err
+	if strings.TrimSpace(segmentText) != "" {
+		if allOutput.Len() > 0 {
+			allOutput.WriteString("\n\n")
 		}
-		if finalText != "" {
-			return finalText, nil
-		}
-		return streamed, nil
+		allOutput.WriteString(strings.TrimSpace(segmentText))
 	}
-	return "", nil
+	return strings.TrimSpace(allOutput.String()), nil
+}
+
+func finalizeAssistantSegment(ctx context.Context, streamer *telegramDraftStreamer, segmentStream *strings.Builder, segmentFinal string) (string, error) {
+	if streamer == nil {
+		return "", nil
+	}
+	streamed := ""
+	if segmentStream != nil {
+		streamed = strings.TrimSpace(segmentStream.String())
+	}
+	if streamed == "" && strings.TrimSpace(segmentFinal) == "" {
+		return "", nil
+	}
+	if err := streamer.Finalize(ctx, segmentFinal); err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(segmentFinal) != "" {
+		return strings.TrimSpace(segmentFinal), nil
+	}
+	return streamed, nil
 }
 
 func (a *App) startTyping(chatID int64) func() {
