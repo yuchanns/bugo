@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -28,6 +29,20 @@ const (
 	contextBudgetWarnRatio     = 0.80
 	contextBudgetCriticalRatio = 0.90
 )
+
+type contextBudgetKey struct{}
+
+type ContextBudget struct {
+	TokenCount int
+	Limit      int
+	Ratio      float64
+}
+
+type contextBudgetState struct {
+	budget ContextBudget
+	mu     sync.Mutex
+	used   int
+}
 
 func AgentRetryMiddleware() blades.Middleware {
 	return middleware.Retry(
@@ -84,6 +99,13 @@ func ContextBudgetMiddleware(model string, limit int) blades.Middleware {
 			tokenCount := estimator.approximateInvocationTokens(invocation)
 			ratio := float64(tokenCount) / float64(estimator.limit)
 			logContextBudget(invocation, tokenCount, estimator.limit, ratio)
+			ctx = context.WithValue(ctx, contextBudgetKey{}, &contextBudgetState{
+				budget: ContextBudget{
+					TokenCount: tokenCount,
+					Limit:      estimator.limit,
+					Ratio:      ratio,
+				},
+			})
 
 			note := contextBudgetNote(ratio)
 			if note == "" {
@@ -100,6 +122,45 @@ func ContextBudgetMiddleware(model string, limit int) blades.Middleware {
 			return next.Handle(ctx, cloned)
 		})
 	}
+}
+
+func ContextBudgetFromContext(ctx context.Context) (ContextBudget, bool) {
+	if ctx == nil {
+		return ContextBudget{}, false
+	}
+	state, ok := ctx.Value(contextBudgetKey{}).(*contextBudgetState)
+	if !ok || state == nil {
+		return ContextBudget{}, false
+	}
+	return state.budget, true
+}
+
+func ApproximateTextTokens(model string, text string) (int, error) {
+	encoder, err := tiktoken.EncodingForModel(model)
+	if err != nil {
+		encoder, err = tiktoken.GetEncoding("cl100k_base")
+	}
+	if err != nil {
+		return 0, err
+	}
+	return len(encoder.Encode(text, nil, nil)), nil
+}
+
+func reserveContextBudget(ctx context.Context, tokens int) bool {
+	if ctx == nil || tokens <= 0 {
+		return true
+	}
+	state, ok := ctx.Value(contextBudgetKey{}).(*contextBudgetState)
+	if !ok || state == nil || state.budget.Limit <= 0 {
+		return true
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.budget.TokenCount+state.used+tokens > state.budget.Limit {
+		return false
+	}
+	state.used += tokens
+	return true
 }
 
 func newPromptBudgetEstimator(model string, limit int) *promptBudgetEstimator {
@@ -295,6 +356,30 @@ func SkillToolLoggingMiddleware() blades.Middleware {
 	}
 }
 
+func WrapToolMiddleware(model string) blades.Middleware {
+	return func(next blades.Handler) blades.Handler {
+		return blades.HandleFunc(func(ctx context.Context, invocation *blades.Invocation) blades.Generator[*blades.Message, error] {
+			if invocation == nil || len(invocation.Tools) == 0 {
+				return next.Handle(ctx, invocation)
+			}
+			cloned := invocation.Clone()
+			for i, tool := range cloned.Tools {
+				if tool == nil {
+					continue
+				}
+				if _, ok := tool.(*wrappedTool); ok {
+					continue
+				}
+				cloned.Tools[i] = &wrappedTool{
+					Tool:  tool,
+					model: model,
+				}
+			}
+			return next.Handle(ctx, cloned)
+		})
+	}
+}
+
 func isSkillToolName(name string) bool {
 	switch name {
 	case skills.ToolListSkillsName,
@@ -326,6 +411,44 @@ func (t *skillLoggedTool) Handle(ctx context.Context, input string) (string, err
 	}
 	logSkillToolSuccess(ctx, t.Name(), input, output, elapsed)
 	return output, nil
+}
+
+type wrappedTool struct {
+	tools.Tool
+	model string
+}
+
+func (t *wrappedTool) Handle(ctx context.Context, input string) (string, error) {
+	output, err := t.Tool.Handle(ctx, input)
+	if err != nil || strings.TrimSpace(output) == "" {
+		return output, err
+	}
+	budget, ok := ContextBudgetFromContext(ctx)
+	if !ok || budget.Limit <= 0 {
+		return output, nil
+	}
+	outputTokens, err := ApproximateTextTokens(t.model, output)
+	if err != nil {
+		return output, nil
+	}
+	if reserveContextBudget(ctx, outputTokens) {
+		return output, nil
+	}
+	log.Warn().
+		Str("tool_name", t.Name()).
+		Int("output_tokens", outputTokens).
+		Int("prompt_tokens", budget.TokenCount).
+		Int("prompt_limit", budget.Limit).
+		Msg("tool.output.context_limited")
+	payload, err := json.Marshal(map[string]any{
+		"warning":    "Tool output was omitted because it would exceed the current context limit. Change tool usage strategy, narrow the request, or reduce the amount of returned data.",
+		"error_code": "CONTEXT_LIMIT_EXCEEDED",
+		"tool_name":  t.Name(),
+	})
+	if err != nil {
+		return `{"warning":"Tool output was omitted because it would exceed the current context limit.","error_code":"CONTEXT_LIMIT_EXCEEDED"}`, nil
+	}
+	return string(payload), nil
 }
 
 func logSkillToolStart(ctx context.Context, name string, input string) {
