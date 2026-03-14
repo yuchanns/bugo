@@ -10,10 +10,13 @@ require (
 	github.com/google/jsonschema-go v0.3.0
 	github.com/google/uuid v1.6.0
 	github.com/openai/openai-go/v3 v3.8.1
+	github.com/pkoukk/tiktoken-go v0.1.8
 )
 
+require github.com/dlclark/regexp2 v1.10.0 // indirect
+
 require (
-	github.com/go-kratos/kit v0.0.0-20251121083925-65298ad2aa44 // indirect
+	github.com/go-kratos/kit v0.0.0-20251121083925-65298ad2aa44
 	github.com/jonboulle/clockwork v0.5.0 // indirect
 	github.com/kr/pretty v0.3.1 // indirect
 	github.com/phuslu/log v1.0.119

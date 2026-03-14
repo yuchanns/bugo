@@ -143,6 +143,7 @@ func (a *App) buildAgent() (blades.Agent, error) {
 			agentRetryMiddleware(),
 			tapeContextMiddleware(a.tapes),
 			workspaceAgentsPromptMiddleware(a.workDir),
+			contextBudgetMiddleware(a.cfg.Model, a.cfg.PromptTokenLimit),
 			patchToolSchemas(),
 		),
 		blades.WithMaxIterations(a.cfg.ModelMaxIterations),

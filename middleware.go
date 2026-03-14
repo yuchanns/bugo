@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"strings"
@@ -15,10 +16,16 @@ import (
 	kitretry "github.com/go-kratos/kit/retry"
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/openai/openai-go/v3"
+	tiktoken "github.com/pkoukk/tiktoken-go"
 	log "github.com/yuchanns/bugo/internal/logging"
 )
 
 const tapeContextMessageLimit = 10
+
+const (
+	contextBudgetWarnRatio     = 0.80
+	contextBudgetCriticalRatio = 0.90
+)
 
 func agentRetryMiddleware() blades.Middleware {
 	return bladesmiddleware.Retry(
@@ -52,6 +59,163 @@ func isRetryableAgentError(err error) bool {
 		errors.Is(err, syscall.ECONNREFUSED) ||
 		errors.Is(err, syscall.EHOSTUNREACH) ||
 		errors.Is(err, syscall.ENETUNREACH)
+}
+
+type promptBudgetEstimator struct {
+	limit   int
+	encoder *tiktoken.Tiktoken
+}
+
+func contextBudgetMiddleware(model string, limit int) blades.Middleware {
+	estimator := newPromptBudgetEstimator(model, limit)
+	if estimator == nil {
+		return func(next blades.Handler) blades.Handler {
+			return next
+		}
+	}
+	return func(next blades.Handler) blades.Handler {
+		return blades.HandleFunc(func(ctx context.Context, invocation *blades.Invocation) blades.Generator[*blades.Message, error] {
+			if invocation == nil {
+				return next.Handle(ctx, invocation)
+			}
+
+			tokenCount := estimator.approximateInvocationTokens(invocation)
+			ratio := float64(tokenCount) / float64(estimator.limit)
+			logContextBudget(invocation, tokenCount, estimator.limit, ratio)
+
+			note := contextBudgetNote(ratio)
+			if note == "" {
+				return next.Handle(ctx, invocation)
+			}
+
+			cloned := invocation.Clone()
+			budgetMessage := blades.SystemMessage(note)
+			if cloned.Instruction == nil {
+				cloned.Instruction = budgetMessage
+			} else {
+				cloned.Instruction = blades.MergeParts(cloned.Instruction, budgetMessage)
+			}
+			return next.Handle(ctx, cloned)
+		})
+	}
+}
+
+func newPromptBudgetEstimator(model string, limit int) *promptBudgetEstimator {
+	if limit <= 0 {
+		return nil
+	}
+
+	encoder, err := tiktoken.EncodingForModel(model)
+	if err != nil {
+		encoder, err = tiktoken.GetEncoding("cl100k_base")
+	}
+	if err != nil {
+		log.Warn().
+			Str("model", model).
+			Err(err).
+			Msg("context.budget.encoder.unavailable")
+		return nil
+	}
+
+	return &promptBudgetEstimator{
+		limit:   limit,
+		encoder: encoder,
+	}
+}
+
+func (e *promptBudgetEstimator) approximateInvocationTokens(invocation *blades.Invocation) int {
+	if e == nil || e.encoder == nil || invocation == nil {
+		return 0
+	}
+
+	var buf strings.Builder
+	appendMessageToBudgetText(&buf, invocation.Instruction)
+	for _, msg := range invocation.History {
+		appendMessageToBudgetText(&buf, msg)
+	}
+	appendMessageToBudgetText(&buf, invocation.Message)
+
+	return len(e.encoder.Encode(buf.String(), nil, nil))
+}
+
+func appendMessageToBudgetText(buf *strings.Builder, msg *blades.Message) {
+	if buf == nil || msg == nil {
+		return
+	}
+	buf.WriteString("role=")
+	buf.WriteString(string(msg.Role))
+	buf.WriteByte('\n')
+	for _, part := range msg.Parts {
+		switch v := part.(type) {
+		case blades.TextPart:
+			buf.WriteString(v.Text)
+		case blades.FilePart:
+			buf.WriteString(v.Name)
+			buf.WriteByte(' ')
+			buf.WriteString(string(v.MIMEType))
+			buf.WriteByte(' ')
+			buf.WriteString(v.URI)
+		case blades.DataPart:
+			buf.WriteString(v.Name)
+			buf.WriteByte(' ')
+			buf.WriteString(string(v.MIMEType))
+			buf.WriteString(" bytes=")
+			buf.WriteString(fmt.Sprintf("%d", len(v.Bytes)))
+		case blades.ToolPart:
+			buf.WriteString("tool ")
+			buf.WriteString(v.Name)
+			buf.WriteString(" request ")
+			buf.WriteString(v.Request)
+			buf.WriteString(" response ")
+			buf.WriteString(v.Response)
+		}
+		buf.WriteByte('\n')
+	}
+}
+
+func logContextBudget(invocation *blades.Invocation, tokenCount int, limit int, ratio float64) {
+	if limit <= 0 || invocation == nil || ratio < contextBudgetWarnRatio {
+		return
+	}
+
+	event := log.Info()
+	if ratio >= contextBudgetCriticalRatio {
+		event = log.Warn()
+	}
+
+	sessionID := ""
+	if invocation.Session != nil {
+		sessionID = invocation.Session.ID()
+	}
+
+	event.
+		Str("session_id", sessionID).
+		Int("prompt_tokens", tokenCount).
+		Int("prompt_limit", limit).
+		Float64("prompt_ratio", ratio).
+		Msg("context.budget")
+}
+
+func contextBudgetNote(ratio float64) string {
+	switch {
+	case ratio >= contextBudgetCriticalRatio:
+		return strings.TrimSpace(`
+<context_budget>
+Context budget is very tight.
+Avoid unnecessary retrieval and use tape_handoff proactively before continuing long or multi-step work.
+Keep working context compact.
+</context_budget>
+`)
+	case ratio >= contextBudgetWarnRatio:
+		return strings.TrimSpace(`
+<context_budget>
+Context budget is getting tight.
+Prefer concise reasoning, avoid unnecessary retrieval, and use tape_handoff before long or multi-step work when a compact checkpoint would help.
+</context_budget>
+`)
+	default:
+		return ""
+	}
 }
 
 func tapeContextMiddleware(tapes *TapeStore) blades.Middleware {

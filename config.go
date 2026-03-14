@@ -26,6 +26,7 @@ type Config struct {
 	Model              string
 	ModelMaxIterations int
 	MaxOutputTokens    int
+	PromptTokenLimit   int
 	APIKey             string
 	APIBase            string
 	WorkDir            string
@@ -44,6 +45,7 @@ func LoadConfig() (Config, error) {
 		Model:              firstNonEmpty(env("BUGO_MODEL"), defaultModel),
 		ModelMaxIterations: intEnv("BUGO_MAX_ITERATIONS", defaultMaxIterations),
 		MaxOutputTokens:    intEnv("BUGO_MAX_OUTPUT_TOKENS", 1024),
+		PromptTokenLimit:   intEnv("BUGO_PROMPT_TOKEN_LIMIT", 0),
 		WorkDir:            env("BUGO_WORKDIR"),
 		HomeDir:            resolveHomeDir(firstNonEmpty(env("BUGO_HOME"), "~/.bugo")),
 	}

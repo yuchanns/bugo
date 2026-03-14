@@ -83,6 +83,7 @@ export BUGO_TELEGRAM_ALLOW_FROM='["123456789","your_username"]'
 export BUGO_BASH_ALLOW_ENV='["SSH_AUTH_SOCK","HTTP_PROXY","HTTPS_PROXY","NO_PROXY"]'
 export BUGO_WORKDIR="/path/to/workspace"
 export BUGO_HOME="~/.bugo"
+export BUGO_PROMPT_TOKEN_LIMIT="131072"
 ```
 
 Notes:
@@ -90,6 +91,7 @@ Notes:
 - If `OPENROUTER_API_KEY` is set and `BUGO_API_BASE` is empty, `BUGO_API_BASE` defaults to `https://openrouter.ai/api/v1`.
 - `BUGO_TELEGRAM_ALLOW_CHATS` and `BUGO_TELEGRAM_ALLOW_FROM` accept either JSON array or comma-separated values.
 - `BUGO_BASH_ALLOW_ENV` appends env names to the shell-tool inherit whitelist (JSON array or comma-separated).
+- `BUGO_PROMPT_TOKEN_LIMIT` enables approximate prompt-budget monitoring and high-watermark hints for the agent.
 - Default inherited shell env includes `PATH`, locale/time vars, and display-related vars such as `DISPLAY`, `XAUTHORITY`, and `XDG_RUNTIME_DIR`.
 - `BUGO_WORKDIR` defaults to the current working directory at startup.
 - History context is selected from entries after the latest tape anchor.
