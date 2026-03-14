@@ -1,4 +1,4 @@
-package main
+package runtime
 
 import (
 	"context"
@@ -19,7 +19,7 @@ const (
 	telegramDraftRetries    = 2
 )
 
-type telegramDraftStreamer struct {
+type TelegramDraftStreamer struct {
 	bot      *bot.Bot
 	chatID   int64
 	threadID int
@@ -33,8 +33,8 @@ type telegramDraftStreamer struct {
 	cooldownUntil time.Time
 }
 
-func newTelegramDraftStreamer(botClient *bot.Bot, chatID int64, threadID int) *telegramDraftStreamer {
-	return &telegramDraftStreamer{
+func NewTelegramDraftStreamer(botClient *bot.Bot, chatID int64, threadID int) *TelegramDraftStreamer {
+	return &TelegramDraftStreamer{
 		bot:      botClient,
 		chatID:   chatID,
 		threadID: threadID,
@@ -42,7 +42,7 @@ func newTelegramDraftStreamer(botClient *bot.Bot, chatID int64, threadID int) *t
 	}
 }
 
-func (s *telegramDraftStreamer) Append(ctx context.Context, delta string) error {
+func (s *TelegramDraftStreamer) Append(ctx context.Context, delta string) error {
 	if delta == "" {
 		return nil
 	}
@@ -68,7 +68,7 @@ func (s *telegramDraftStreamer) Append(ctx context.Context, delta string) error 
 	return s.flushDraft(ctx, true)
 }
 
-func (s *telegramDraftStreamer) Finalize(ctx context.Context, finalText string) error {
+func (s *TelegramDraftStreamer) Finalize(ctx context.Context, finalText string) error {
 	if strings.TrimSpace(finalText) == "" {
 		s.mu.Lock()
 		finalText = s.builder.String()
@@ -82,9 +82,9 @@ func (s *telegramDraftStreamer) Finalize(ctx context.Context, finalText string) 
 	return s.sendFinal(ctx, finalText)
 }
 
-func (s *telegramDraftStreamer) Stop() {}
+func (s *TelegramDraftStreamer) Stop() {}
 
-func (s *telegramDraftStreamer) flushCompletedPrefix(ctx context.Context) error {
+func (s *TelegramDraftStreamer) flushCompletedPrefix(ctx context.Context) error {
 	s.mu.Lock()
 	text := s.builder.String()
 	parts := splitTextByRunes(text, telegramDraftChunkLimit)
@@ -109,7 +109,7 @@ func (s *telegramDraftStreamer) flushCompletedPrefix(ctx context.Context) error 
 	return nil
 }
 
-func (s *telegramDraftStreamer) flushDraft(ctx context.Context, withCursor bool) error {
+func (s *TelegramDraftStreamer) flushDraft(ctx context.Context, withCursor bool) error {
 	s.mu.Lock()
 	text := s.builder.String()
 	if text == "" {
@@ -145,7 +145,7 @@ func (s *telegramDraftStreamer) flushDraft(ctx context.Context, withCursor bool)
 	return nil
 }
 
-func (s *telegramDraftStreamer) sendFinal(ctx context.Context, text string) error {
+func (s *TelegramDraftStreamer) sendFinal(ctx context.Context, text string) error {
 	parts := splitTextByRunes(text, telegramDraftChunkLimit)
 	for _, part := range parts {
 		if _, err := s.bot.SendMessage(ctx, &bot.SendMessageParams{
@@ -166,7 +166,7 @@ func (s *telegramDraftStreamer) sendFinal(ctx context.Context, text string) erro
 	return nil
 }
 
-func (s *telegramDraftStreamer) sendDraftWithRetry(ctx context.Context, text string) error {
+func (s *TelegramDraftStreamer) sendDraftWithRetry(ctx context.Context, text string) error {
 	var lastErr error
 	for attempt := 0; attempt <= telegramDraftRetries; attempt++ {
 		_, err := s.bot.SendMessageDraft(ctx, &bot.SendMessageDraftParams{
@@ -217,4 +217,21 @@ func trimPrefixRunes(text string, n int) string {
 		return ""
 	}
 	return string(runes[n:])
+}
+
+func splitTextByRunes(text string, limit int) []string {
+	if limit <= 0 {
+		return []string{text}
+	}
+	runes := []rune(text)
+	if len(runes) <= limit {
+		return []string{text}
+	}
+
+	parts := make([]string, 0, (len(runes)+limit-1)/limit)
+	for start := 0; start < len(runes); start += limit {
+		end := min(start+limit, len(runes))
+		parts = append(parts, string(runes[start:end]))
+	}
+	return parts
 }

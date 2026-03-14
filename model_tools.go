@@ -11,6 +11,7 @@ import (
 	"github.com/go-kratos/blades"
 	bladestools "github.com/go-kratos/blades/tools"
 	log "github.com/yuchanns/bugo/internal/logging"
+	runtimepkg "github.com/yuchanns/bugo/internal/runtime"
 )
 
 func addFuncTool[I, O any](
@@ -234,10 +235,10 @@ type tapeInfoToolInput struct {
 	RequestID string `json:"request_id,omitempty"`
 }
 
-func (a *App) handleTapeInfoTool(ctx context.Context, _ tapeInfoToolInput) (TapeInfo, error) {
+func (a *App) handleTapeInfoTool(ctx context.Context, _ tapeInfoToolInput) (runtimepkg.TapeInfo, error) {
 	sessionID, err := sessionIDFromContext(ctx)
 	if err != nil {
-		return TapeInfo{}, err
+		return runtimepkg.TapeInfo{}, err
 	}
 	return a.tapes.Info(sessionID)
 }
@@ -247,7 +248,7 @@ type tapeAnchorsToolInput struct {
 }
 
 type tapeAnchorsToolOutput struct {
-	Anchors []TapeRecord `json:"anchors"`
+	Anchors []runtimepkg.TapeRecord `json:"anchors"`
 }
 
 func (a *App) handleTapeAnchorsTool(ctx context.Context, in tapeAnchorsToolInput) (tapeAnchorsToolOutput, error) {

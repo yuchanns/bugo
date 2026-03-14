@@ -1,4 +1,4 @@
-package main
+package runtime
 
 import (
 	"bufio"
@@ -41,7 +41,7 @@ type TapeStore struct {
 	mu   sync.RWMutex
 }
 
-var errTapeAnchorNotFound = errors.New("tape anchor not found")
+var ErrTapeAnchorNotFound = errors.New("tape anchor not found")
 
 func NewTapeStore(root, _ string) (*TapeStore, error) {
 	if err := os.MkdirAll(root, 0o755); err != nil {
@@ -129,7 +129,7 @@ func (s *TapeStore) HistoryMessages(sessionID string) ([]*blades.Message, error)
 		return nil, err
 	}
 	if !foundAnchor {
-		return nil, errTapeAnchorNotFound
+		return nil, ErrTapeAnchorNotFound
 	}
 	return selectTapeMessages(history), nil
 }

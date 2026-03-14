@@ -8,16 +8,17 @@ import (
 
 	"github.com/go-kratos/blades"
 	log "github.com/yuchanns/bugo/internal/logging"
+	runtimepkg "github.com/yuchanns/bugo/internal/runtime"
 )
 
 type TapeSession struct {
 	id    string
 	state blades.State
-	tapes *TapeStore
+	tapes *runtimepkg.TapeStore
 	mu    sync.RWMutex
 }
 
-func NewTapeSession(id string, tapes *TapeStore) *TapeSession {
+func NewTapeSession(id string, tapes *runtimepkg.TapeStore) *TapeSession {
 	return &TapeSession{
 		id:    id,
 		state: blades.State{},
@@ -69,12 +70,12 @@ func (s *TapeSession) Reset() {
 }
 
 type SessionStore struct {
-	tapes *TapeStore
+	tapes *runtimepkg.TapeStore
 	mu    sync.Mutex
 	sets  map[string]*TapeSession
 }
 
-func NewSessionStore(tapes *TapeStore) *SessionStore {
+func NewSessionStore(tapes *runtimepkg.TapeStore) *SessionStore {
 	return &SessionStore{
 		tapes: tapes,
 		sets:  map[string]*TapeSession{},

@@ -5,123 +5,48 @@
 [![Image Tags](https://ghcr-badge.yuchanns.xyz/yuchanns/bugo/tags?ignore=latest)](https://ghcr.io/yuchanns/bugo)
 ![Image Size](https://ghcr-badge.yuchanns.xyz/yuchanns/bugo/size)
 
-`bugo` is a Telegram agent runtime in Go, inspired by and implemented with reference to:
+`bugo` is an agent runtime in Go.
 
-- https://github.com/bubbuild/bub/
+It is built for long-running operator-style use: explicit sessions, tape-backed memory, visible tool execution, and handoff-friendly continuity.
+The current implementation supports Telegram as its first channel.
 
-Current scope includes:
+## Current Implementation
 
-- Telegram polling adapter (`go-telegram/bot`)
-- Session-based execution (`blades.Runner` + custom `Session`)
-- Append-only tape storage (JSONL)
-- Skills loading (`embed.FS` built-ins + optional external overrides)
+This repository contains the current Go runtime for `bugo`.
+Today it is wired to Telegram as the active channel and uses `blades` as the agent runtime.
 
-## 1. Recommended deployment (container, safer)
+- Telegram adapter: `app.go`
+- Tool registration: `app.go` + `model_tools.go`
+- Local command execution: `commands.go`
+- Session runtime: `session.go`
+- Runtime internals: `internal/runtime`
+- Workspace prompt loading: `workspace_prompt.go`
 
-Container deployment is recommended for production usage.
-It is safer than running directly on the host because process/runtime boundaries are isolated and writable paths are explicit.
-
-The published image is intended to be agent-ready instead of a bare runtime.
-It includes common CLI tools (`git`, `curl`, `jq`, `ripgrep`, `less`, `openssh-client`), Node.js tooling (`node`, `npm`, `npx`/`npm exec`), and a preinstalled virtual X server stack.
-By default the container exports `DISPLAY=:99`, starts `Xvfb` before `bugo`, and keeps browser/runtime libraries available for visual automation workloads.
-The runtime user defaults to a regular `bugo` account instead of `root`; it still has passwordless `sudo`, so the agent can self-manage packages or escalate when needed.
-
-```bash
-docker run -d --name bugo \
-  -e BUGO_TELEGRAM_TOKEN="123456:xxxx" \
-  -e BUGO_API_KEY="sk-xxxx" \
-  -e BUGO_MODEL="gpt-4o-mini" \
-  -v "$HOME/.bugo:/data/.bugo" \
-  ghcr.io/yuchanns/bugo:latest
-```
-
-Optional hardening:
-
-- Use a pinned image tag instead of `latest`.
-- Use `--restart unless-stopped`.
-- Mount only the data directory you need.
-
-Virtual display knobs:
-
-- `DISPLAY`: defaults to `:99`.
-- `BUGO_ENABLE_XVFB=0`: disable auto-started virtual display when you want to provide your own X server.
-- `XVFB_RESOLUTION=1920x1080x24`: override the default screen geometry/depth.
-- `XVFB_ARGS="-dpi 120"`: append extra `Xvfb` flags when needed.
-
-Container user knobs:
-
-- Build args `BUGO_UID` / `BUGO_GID`: default to `1000`, useful when matching host-mounted volume ownership.
-- The container starts as user `bugo`, but `sudo` does not require a password.
-- This improves non-root runtime ergonomics, but it is not a hard security boundary because passwordless `sudo` still grants full root inside the container.
-
-## 2. Install (local binary)
+## Quick Start
 
 ```bash
 go install github.com/yuchanns/bugo@latest
 ```
 
-After installation, run:
-
-```bash
-bugo
-```
-
-## 3. Required environment variables
-
 ```bash
 export BUGO_TELEGRAM_TOKEN="123456:xxxx"
 export BUGO_API_KEY="sk-xxxx"
+bugo
 ```
 
-Optional:
+## Runtime Behavior
 
-```bash
-export BUGO_MODEL="gpt-4o-mini"
-export BUGO_API_BASE="https://your-provider.example/v1"
-export BUGO_TELEGRAM_ALLOW_CHATS='["123456789"]'
-export BUGO_TELEGRAM_ALLOW_FROM='["123456789","your_username"]'
-export BUGO_BASH_DENY_ENV='["BUGO_API_KEY"]'
-export BUGO_WORKDIR="/path/to/workspace"
-export BUGO_HOME="~/.bugo"
-export BUGO_PROMPT_TOKEN_LIMIT="131072"
-```
+- Telegram private chats are active by default.
+- Telegram group chats require mention or reply context.
+- Inputs starting with `,` are treated as local runtime commands.
+- Regular turns run through the agent loop with tool support.
+- Session memory is stored in tape and can be retrieved through tape tools.
+- Assistant replies stream through Telegram drafts and finalize as normal messages.
+- If a user sends more input while a run is still iterating, the runtime can inject that input into the next model iteration instead of waiting for the whole run to finish.
 
-Notes:
+## Commands
 
-- `BUGO_TELEGRAM_ALLOW_CHATS` and `BUGO_TELEGRAM_ALLOW_FROM` accept either JSON array or comma-separated values.
-- `BUGO_BASH_DENY_ENV` appends env names to the shell-tool inherit blacklist (JSON array or comma-separated). By default, `BUGO_API_KEY` is always excluded.
-- `BUGO_PROMPT_TOKEN_LIMIT` enables approximate prompt-budget monitoring and high-watermark hints for the agent.
-- Default inherited shell env includes `PATH`, locale/time vars, and display-related vars such as `DISPLAY`, `XAUTHORITY`, and `XDG_RUNTIME_DIR`.
-- `BUGO_WORKDIR` defaults to the current working directory at startup.
-- History context is selected from entries after the latest tape anchor.
-
-## 4. Skills loading
-
-### 4.1 Built-in skills (default)
-
-Repository `skills/` are embedded into the binary via `embed.FS` and loaded by default.
-Current built-ins include:
-
-- `skill-creator`
-- `skill-installer`
-
-### 4.2 External skills
-
-Bugo loads external skills from:
-
-- `$BUGO_WORKDIR/.agents/skills` (or startup CWD when `BUGO_WORKDIR` is not set)
-
-If an external skill has the same name as a built-in one, the external skill overrides it.
-
-## 5. Telegram behavior
-
-- Private chats are handled by default.
-- Group chats are handled only when mention/reply conditions match.
-- Session key format: `telegram:<chat_id>`.
-- Inputs with `,` prefix go to local command channel.
-- Assistant replies are streamed back to Telegram draft messages and finalized as normal messages.
-
-Command examples:
+Examples:
 
 ```text
 ,help
@@ -131,34 +56,52 @@ Command examples:
 ,fs.read path=README.md
 ,fs.write path=notes/todo.txt content="hello"
 ,fs.edit path=notes/todo.txt old=hello new=world
-,tape.handoff name=phase-1 summary="bootstrap done"
-,tape.anchors
 ,tape.info
 ,tape.search query=error
-,tape.reset archive=true
-,schedule.add cron="*/5 * * * *" message="ping"
+,tape.handoff summary="checkpoint"
 ,schedule.list
-,schedule.remove job_id=my-job
 ,skills.list
-,skills.reload
-,quit
 ```
 
-## 6. Tape storage
+## Skills
 
-Default location:
+- Built-in skills are embedded from `skills/`
+- External skills are loaded from `<workspace>/.agents/skills`
+- External skills override built-ins with the same name
+- Each skill directory must include `SKILL.md`
 
-```text
-~/.bugo/tapes/*.jsonl
-```
+## Runtime Environment Variables
 
-Each session maps to one append-only JSONL tape file.
+- `BUGO_TELEGRAM_TOKEN`: Telegram bot token
+- `BUGO_API_KEY`: model provider key
+- `BUGO_API_BASE`: optional provider base URL
+- `BUGO_MODEL`: model name, default `gpt-4o-mini`
+- `BUGO_MAX_ITERATIONS`: max agent iterations
+- `BUGO_MAX_OUTPUT_TOKENS`: max model output tokens
+- `BUGO_PROMPT_TOKEN_LIMIT`: optional soft prompt budget for context-pressure hints
+- `BUGO_TELEGRAM_ALLOW_CHATS`: allowed chat ids
+- `BUGO_TELEGRAM_ALLOW_FROM`: allowed user ids or usernames
+- `BUGO_WORKDIR`: workspace root
+- `BUGO_HOME`: runtime home, default `~/.bugo`
+- `BUGO_BASH_DENY_ENV`: extra env names excluded from the `bash` tool; `BUGO_API_KEY` is denied by default
 
-## 7. Local development
+## Storage
+
+- Tape files: `~/.bugo/tapes/*.jsonl`
+- Each session maps to one append-only JSONL tape
+
+## Development
 
 ```bash
 go mod tidy
-go mod vendor
 go test ./...
 go build -o bugo .
 ```
+
+## License
+
+[Apache-2.0](./LICENSE)
+
+## Credits
+
+- Inspired by [bub](https://github.com/bubbuild/bub)

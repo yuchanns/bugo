@@ -1,4 +1,4 @@
-package main
+package runtime
 
 import (
 	"context"
@@ -27,7 +27,7 @@ const (
 	contextBudgetCriticalRatio = 0.90
 )
 
-func agentRetryMiddleware() blades.Middleware {
+func AgentRetryMiddleware() blades.Middleware {
 	return bladesmiddleware.Retry(
 		5,
 		kitretry.WithBaseDelay(300*time.Millisecond),
@@ -66,7 +66,7 @@ type promptBudgetEstimator struct {
 	encoder *tiktoken.Tiktoken
 }
 
-func contextBudgetMiddleware(model string, limit int) blades.Middleware {
+func ContextBudgetMiddleware(model string, limit int) blades.Middleware {
 	estimator := newPromptBudgetEstimator(model, limit)
 	if estimator == nil {
 		return func(next blades.Handler) blades.Handler {
@@ -218,7 +218,7 @@ Prefer concise reasoning, avoid unnecessary retrieval, and use tape_handoff befo
 	}
 }
 
-func tapeContextMiddleware(tapes *TapeStore) blades.Middleware {
+func TapeContextMiddleware(tapes *TapeStore) blades.Middleware {
 	return func(next blades.Handler) blades.Handler {
 		return blades.HandleFunc(func(ctx context.Context, invocation *blades.Invocation) blades.Generator[*blades.Message, error] {
 			if invocation == nil || invocation.Session == nil || tapes == nil {
@@ -234,7 +234,7 @@ func tapeContextMiddleware(tapes *TapeStore) blades.Middleware {
 			}
 			history, err := tapes.HistoryMessages(sessionID)
 			if err != nil {
-				if !errors.Is(err, errTapeAnchorNotFound) {
+				if !errors.Is(err, ErrTapeAnchorNotFound) {
 					log.Error().
 						Str("session_id", sessionID).
 						Err(err).
@@ -272,7 +272,7 @@ func tailMessages(history []*blades.Message, limit int) []*blades.Message {
 
 // patchToolSchemas patches tool input schemas for gateways that reject
 // object schemas with empty properties.
-func patchToolSchemas() blades.Middleware {
+func PatchToolSchemas() blades.Middleware {
 	return func(next blades.Handler) blades.Handler {
 		return blades.HandleFunc(func(ctx context.Context, invocation *blades.Invocation) blades.Generator[*blades.Message, error] {
 			if invocation == nil || len(invocation.Tools) == 0 {

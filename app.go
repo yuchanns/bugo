@@ -23,11 +23,12 @@ import (
 	"github.com/go-telegram/bot/models"
 	"github.com/openai/openai-go/v3/option"
 	log "github.com/yuchanns/bugo/internal/logging"
+	runtimepkg "github.com/yuchanns/bugo/internal/runtime"
 )
 
 type App struct {
 	cfg      Config
-	tapes    *TapeStore
+	tapes    *runtimepkg.TapeStore
 	sessions *SessionStore
 	inboxes  *inboxHub
 	runner   *blades.Runner
@@ -48,7 +49,7 @@ func NewApp(cfg Config) (*App, error) {
 		return nil, err
 	}
 
-	tapes, err := NewTapeStore(filepath.Join(cfg.HomeDir, "tapes"), cfg.Model)
+	tapes, err := runtimepkg.NewTapeStore(filepath.Join(cfg.HomeDir, "tapes"), cfg.Model)
 	if err != nil {
 		return nil, err
 	}
@@ -141,11 +142,11 @@ func (a *App) buildAgent() (blades.Agent, error) {
 		blades.WithTools(tools...),
 		blades.WithSkills(skillList...),
 		blades.WithMiddleware(
-			agentRetryMiddleware(),
-			tapeContextMiddleware(a.tapes),
+			runtimepkg.AgentRetryMiddleware(),
+			runtimepkg.TapeContextMiddleware(a.tapes),
 			workspaceAgentsPromptMiddleware(a.workDir),
-			contextBudgetMiddleware(a.cfg.Model, a.cfg.PromptTokenLimit),
-			patchToolSchemas(),
+			runtimepkg.ContextBudgetMiddleware(a.cfg.Model, a.cfg.PromptTokenLimit),
+			runtimepkg.PatchToolSchemas(),
 		),
 		blades.WithMaxIterations(a.cfg.ModelMaxIterations),
 	)
@@ -701,7 +702,7 @@ func (a *App) runModelPrompt(inbox *sessionInbox, session *TapeSession, chatID i
 	}
 
 	var (
-		streamer       = newTelegramDraftStreamer(a.bot, chatID, threadID)
+		streamer       = runtimepkg.NewTelegramDraftStreamer(a.bot, chatID, threadID)
 		segmentStream  strings.Builder
 		segmentFinal   string
 		allOutput      strings.Builder
@@ -743,7 +744,7 @@ func (a *App) runModelPrompt(inbox *sessionInbox, session *TapeSession, chatID i
 				allOutput.WriteString(strings.TrimSpace(segmentText))
 			}
 			streamer.Stop()
-			streamer = newTelegramDraftStreamer(a.bot, chatID, threadID)
+			streamer = runtimepkg.NewTelegramDraftStreamer(a.bot, chatID, threadID)
 			segmentStream.Reset()
 			segmentFinal = ""
 			segmentVersion = currentVersion
@@ -778,7 +779,7 @@ func (a *App) runModelPrompt(inbox *sessionInbox, session *TapeSession, chatID i
 	return strings.TrimSpace(allOutput.String()), nil
 }
 
-func finalizeAssistantSegment(ctx context.Context, streamer *telegramDraftStreamer, segmentStream *strings.Builder, segmentFinal string) (string, error) {
+func finalizeAssistantSegment(ctx context.Context, streamer *runtimepkg.TelegramDraftStreamer, segmentStream *strings.Builder, segmentFinal string) (string, error) {
 	if streamer == nil {
 		return "", nil
 	}
@@ -884,7 +885,7 @@ type tapeRecentInput struct {
 }
 
 type tapeRecentOutput struct {
-	Records []TapeRecord `json:"records"`
+	Records []runtimepkg.TapeRecord `json:"records"`
 }
 
 func (a *App) handleTapeRecentTool(ctx context.Context, in tapeRecentInput) (tapeRecentOutput, error) {
@@ -909,7 +910,7 @@ type tapeSearchInput struct {
 }
 
 type tapeSearchOutput struct {
-	Records []TapeRecord `json:"records"`
+	Records []runtimepkg.TapeRecord `json:"records"`
 }
 
 func (a *App) handleTapeSearchTool(ctx context.Context, in tapeSearchInput) (tapeSearchOutput, error) {
