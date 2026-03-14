@@ -63,18 +63,6 @@ func logToolCallError(name string, elapsed time.Duration, err error) {
 		Msg("tool.call.error")
 }
 
-type bashToolInput struct {
-	Cmd string `json:"cmd"`
-}
-
-func (a *App) handleBashTool(ctx context.Context, in bashToolInput) (string, error) {
-	command := strings.TrimSpace(in.Cmd)
-	if command == "" {
-		return "", fmt.Errorf("cmd is required")
-	}
-	return a.executeShell(ctx, command)
-}
-
 type fsReadToolInput struct {
 	Path string `json:"path"`
 }

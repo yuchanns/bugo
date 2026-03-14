@@ -52,7 +52,6 @@ Examples:
 ,help
 ,tools
 ,tool.describe name=fs.read
-,git status
 ,fs.read path=README.md
 ,fs.write path=notes/todo.txt content="hello"
 ,fs.edit path=notes/todo.txt old=hello new=world
@@ -83,7 +82,6 @@ Examples:
 - `BUGO_TELEGRAM_ALLOW_FROM`: allowed user ids or usernames
 - `BUGO_WORKDIR`: workspace root
 - `BUGO_HOME`: runtime home, default `~/.bugo`
-- `BUGO_BASH_DENY_ENV`: extra env names excluded from the `bash` tool; `BUGO_API_KEY` is denied by default
 
 ## Storage
 

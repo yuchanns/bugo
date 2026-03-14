@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -11,12 +12,13 @@ import (
 	"time"
 
 	"github.com/go-kratos/blades"
-	bladesmiddleware "github.com/go-kratos/blades/middleware"
-	bladestools "github.com/go-kratos/blades/tools"
-	kitretry "github.com/go-kratos/kit/retry"
+	"github.com/go-kratos/blades/middleware"
+	"github.com/go-kratos/blades/skills"
+	"github.com/go-kratos/blades/tools"
+	"github.com/go-kratos/kit/retry"
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/openai/openai-go/v3"
-	tiktoken "github.com/pkoukk/tiktoken-go"
+	"github.com/pkoukk/tiktoken-go"
 	log "github.com/yuchanns/bugo/internal/logging"
 )
 
@@ -28,11 +30,11 @@ const (
 )
 
 func AgentRetryMiddleware() blades.Middleware {
-	return bladesmiddleware.Retry(
+	return middleware.Retry(
 		5,
-		kitretry.WithBaseDelay(300*time.Millisecond),
-		kitretry.WithMaxDelay(2*time.Second),
-		kitretry.WithRetryable(isRetryableAgentError),
+		retry.WithBaseDelay(300*time.Millisecond),
+		retry.WithMaxDelay(2*time.Second),
+		retry.WithRetryable(isRetryableAgentError),
 	)
 }
 
@@ -270,6 +272,122 @@ func tailMessages(history []*blades.Message, limit int) []*blades.Message {
 	return history[len(history)-limit:]
 }
 
+func SkillToolLoggingMiddleware() blades.Middleware {
+	return func(next blades.Handler) blades.Handler {
+		return blades.HandleFunc(func(ctx context.Context, invocation *blades.Invocation) blades.Generator[*blades.Message, error] {
+			if invocation == nil || len(invocation.Tools) == 0 {
+				return next.Handle(ctx, invocation)
+			}
+			for i, tool := range invocation.Tools {
+				if tool == nil {
+					continue
+				}
+				if _, ok := tool.(*skillLoggedTool); ok {
+					continue
+				}
+				if !isSkillToolName(tool.Name()) {
+					continue
+				}
+				invocation.Tools[i] = &skillLoggedTool{Tool: tool}
+			}
+			return next.Handle(ctx, invocation)
+		})
+	}
+}
+
+func isSkillToolName(name string) bool {
+	switch name {
+	case skills.ToolListSkillsName,
+		skills.ToolLoadSkillName,
+		skills.ToolLoadSkillResourceName,
+		skills.ToolRunSkillScriptName:
+		return true
+	default:
+		return false
+	}
+}
+
+type skillLoggedTool struct {
+	tools.Tool
+}
+
+func (t *skillLoggedTool) Handle(ctx context.Context, input string) (string, error) {
+	logSkillToolStart(ctx, t.Name(), input)
+	start := time.Now()
+	output, err := t.Tool.Handle(ctx, input)
+	elapsed := time.Since(start)
+	if err != nil {
+		log.Error().
+			Str("name", t.Name()).
+			Float64("elapsed_ms", float64(elapsed.Microseconds())/1000.0).
+			Err(err).
+			Msg("skill.tool.error")
+		return output, err
+	}
+	logSkillToolSuccess(ctx, t.Name(), input, output, elapsed)
+	return output, nil
+}
+
+func logSkillToolStart(ctx context.Context, name string, input string) {
+	event := log.Info().
+		Str("name", name).
+		Str("params", log.PrettifyText(input))
+	appendSessionID(event, ctx)
+	appendSkillRunFields(event, name, input, "")
+	event.Msg("skill.tool.start")
+}
+
+func logSkillToolSuccess(ctx context.Context, name string, input string, output string, elapsed time.Duration) {
+	event := log.Info().
+		Str("name", name).
+		Float64("elapsed_ms", float64(elapsed.Microseconds())/1000.0)
+	appendSessionID(event, ctx)
+	appendSkillRunFields(event, name, input, output)
+	event.Msg("skill.tool.success")
+}
+
+func appendSessionID(event *log.Event, ctx context.Context) {
+	if event == nil {
+		return
+	}
+	if session, ok := blades.FromSessionContext(ctx); ok && session != nil {
+		event.Str("session_id", session.ID())
+	}
+}
+
+func appendSkillRunFields(event *log.Event, name string, input string, output string) {
+	if event == nil || name != skills.ToolRunSkillScriptName {
+		return
+	}
+	var req struct {
+		SkillName      string   `json:"skill_name"`
+		ScriptPath     string   `json:"script_path"`
+		Args           []string `json:"args"`
+		TimeoutSeconds int      `json:"timeout_seconds"`
+	}
+	if err := json.Unmarshal([]byte(input), &req); err == nil {
+		event.Str("skill_name", req.SkillName)
+		event.Str("script_path", req.ScriptPath)
+		if len(req.Args) > 0 {
+			event.Str("args", log.RenderValue(req.Args))
+		}
+		if req.TimeoutSeconds > 0 {
+			event.Int("timeout_seconds", req.TimeoutSeconds)
+		}
+	}
+
+	var resp struct {
+		Status   string `json:"status"`
+		ExitCode int    `json:"exit_code"`
+	}
+	if output != "" && json.Unmarshal([]byte(output), &resp) == nil {
+		if strings.TrimSpace(resp.Status) != "" {
+			event.Str("status", resp.Status)
+		}
+		event.Int("exit_code", resp.ExitCode)
+	}
+}
+
 // patchToolSchemas patches tool input schemas for gateways that reject
 // object schemas with empty properties.
 func PatchToolSchemas() blades.Middleware {
@@ -293,7 +411,7 @@ func PatchToolSchemas() blades.Middleware {
 }
 
 type patchedSchemaTool struct {
-	bladestools.Tool
+	tools.Tool
 }
 
 func (t *patchedSchemaTool) InputSchema() *jsonschema.Schema {

@@ -31,7 +31,6 @@ type Config struct {
 	APIBase            string
 	WorkDir            string
 	HomeDir            string
-	BashDenyEnv        []string
 }
 
 func LoadConfig() (Config, error) {
@@ -49,12 +48,6 @@ func LoadConfig() (Config, error) {
 		WorkDir:            env("BUGO_WORKDIR"),
 		HomeDir:            resolveHomeDir(firstNonEmpty(env("BUGO_HOME"), "~/.bugo")),
 	}
-	bashDenyEnv, err := parseEnvNameList(env("BUGO_BASH_DENY_ENV"))
-	if err != nil {
-		return Config{}, fmt.Errorf("parse bash deny env: %w", err)
-	}
-	cfg.BashDenyEnv = bashDenyEnv
-
 	cfg.APIKey = env("BUGO_API_KEY")
 	cfg.APIBase = env("BUGO_API_BASE")
 
@@ -137,26 +130,6 @@ func parseInt64Set(raw string) (map[int64]struct{}, error) {
 			return nil, fmt.Errorf("invalid int64 value %q", item)
 		}
 		out[id] = struct{}{}
-	}
-	return out, nil
-}
-
-func parseEnvNameList(raw string) ([]string, error) {
-	seen := map[string]struct{}{}
-	out := make([]string, 0, 8)
-	for _, item := range splitAnyList(raw) {
-		name := strings.TrimSpace(item)
-		if name == "" {
-			continue
-		}
-		if strings.Contains(name, "=") {
-			return nil, fmt.Errorf("invalid env name %q", name)
-		}
-		if _, ok := seen[name]; ok {
-			continue
-		}
-		seen[name] = struct{}{}
-		out = append(out, name)
 	}
 	return out, nil
 }

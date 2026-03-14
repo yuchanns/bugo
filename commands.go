@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -31,7 +30,6 @@ var builtinCommandSpecs = map[string]commandSpec{
 	"help":          {Name: "help", Description: "Show command help", Usage: ",help"},
 	"tools":         {Name: "tools", Description: "List available tools", Usage: ",tools"},
 	"tool.describe": {Name: "tool.describe", Description: "Show one tool detail", Usage: ",tool.describe name=fs.read"},
-	"bash":          {Name: "bash", Description: "Run shell command", Usage: ",git status"},
 	"fs.read":       {Name: "fs.read", Description: "Read file content", Usage: ",fs.read path=README.md"},
 	"fs.write":      {Name: "fs.write", Description: "Write file content", Usage: ",fs.write path=note.txt content='hello'"},
 	"fs.edit":       {Name: "fs.edit", Description: "Replace text in file", Usage: ",fs.edit path=note.txt old='hello' new='world'"},
@@ -65,6 +63,7 @@ func (a *App) handleScheduledMessage(sessionID string, chatID int64, message str
 	inbox.session.SetState("session_id", sessionID)
 	inbox.session.SetState("channel", "telegram")
 	inbox.session.SetState("chat_id", chatID)
+	inbox.session.SetState("workspace", a.workDir)
 	if strings.HasPrefix(strings.TrimSpace(message), ",") {
 		a.handleCommand(context.Background(), inbox, message)
 		return
@@ -141,7 +140,7 @@ func (a *App) executeCommand(ctx context.Context, inbox *sessionInbox, content s
 	}
 
 	if _, ok := builtinCommandSpecs[name]; !ok {
-		return a.executeShell(ctx, raw)
+		return "", fmt.Errorf("unsupported command: %s", name)
 	}
 
 	parsed := parseCommandArgs(args)
@@ -152,8 +151,6 @@ func (a *App) executeCommand(ctx context.Context, inbox *sessionInbox, content s
 		return a.listToolsText(), nil
 	case "tool.describe":
 		return a.describeToolText(parsed), nil
-	case "bash":
-		return a.execBash(ctx, parsed)
 	case "tape.handoff":
 		return a.execTapeHandoff(inbox, parsed)
 	case "tape.anchors":
@@ -198,7 +195,7 @@ func (a *App) commandHelpText() string {
 
 	lines := []string{
 		"Commands use ',' at line start.",
-		"Known names map to internal commands; other comma-prefixed lines run through bash.",
+		"Only registered comma commands are supported.",
 		"Available commands:",
 	}
 	for _, name := range names {
@@ -220,9 +217,6 @@ func (a *App) commandHelpText() string {
 			lines = append(lines, fmt.Sprintf("  ,%s -> ,%s", alias, commandAliases[alias]))
 		}
 	}
-	lines = append(lines, "Shell examples:")
-	lines = append(lines, "  ,git status")
-	lines = append(lines, "  , ls -la")
 	return strings.Join(lines, "\n")
 }
 
@@ -540,78 +534,17 @@ func (a *App) execFSEdit(parsed parsedCommandArgs) (string, error) {
 	return fmt.Sprintf("edited: %s", resolved), nil
 }
 
-func (a *App) execBash(ctx context.Context, parsed parsedCommandArgs) (string, error) {
-	command := strings.TrimSpace(parsed.Kwargs["cmd"])
-	if command == "" && len(parsed.Positional) > 0 {
-		command = strings.TrimSpace(strings.Join(parsed.Positional, " "))
-	}
-	if command == "" {
-		return "", fmt.Errorf("cmd is required")
-	}
-	return a.executeShell(ctx, command)
-}
-
-func (a *App) executeShell(ctx context.Context, command string) (string, error) {
-	cmd := exec.CommandContext(ctx, "bash", "--noprofile", "--norc", "-c", command)
-	cmd.Env = a.minimalShellEnv()
-	if strings.TrimSpace(a.workDir) != "" {
-		cmd.Dir = a.workDir
-	}
-	out, err := cmd.CombinedOutput()
-	text := strings.TrimSpace(string(out))
-	if err != nil {
-		if text == "" {
-			return err.Error(), nil
-		}
-		return err.Error() + "\n" + text, nil
-	}
-	if text == "" {
-		return "(no output)", nil
-	}
-	return text, nil
-}
-
-func (a *App) minimalShellEnv() []string {
-	envMap := a.minimalShellEnvMap()
-	env := make([]string, 0, len(envMap))
-	for k, v := range envMap {
-		env = append(env, k+"="+v)
-	}
-	return env
-}
-
-func (a *App) minimalShellEnvMap() map[string]string {
-	deny := map[string]struct{}{
-		"BUGO_API_KEY": {},
-	}
-	for _, key := range a.cfg.BashDenyEnv {
-		key = strings.TrimSpace(key)
-		if key == "" {
-			continue
-		}
-		deny[key] = struct{}{}
-	}
-
-	env := make(map[string]string)
-	for _, item := range os.Environ() {
-		key, value, ok := strings.Cut(item, "=")
-		if !ok {
-			continue
-		}
-		if _, blocked := deny[key]; blocked {
-			continue
-		}
-		env[key] = value
-	}
-	return env
-}
-
 func (a *App) resolveWorkspacePath(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return "", fmt.Errorf("path is required")
 	}
-	allowedEnv := a.minimalShellEnvMap()
+	allowedEnv := map[string]string{}
+	for _, key := range []string{"HOME"} {
+		if value, ok := os.LookupEnv(key); ok {
+			allowedEnv[key] = value
+		}
+	}
 	raw = os.Expand(raw, func(key string) string {
 		return allowedEnv[key]
 	})

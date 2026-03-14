@@ -146,6 +146,7 @@ func (a *App) buildAgent() (blades.Agent, error) {
 			runtimepkg.TapeContextMiddleware(a.tapes),
 			workspaceAgentsPromptMiddleware(a.workDir),
 			runtimepkg.ContextBudgetMiddleware(a.cfg.Model, a.cfg.PromptTokenLimit),
+			runtimepkg.SkillToolLoggingMiddleware(),
 			runtimepkg.PatchToolSchemas(),
 		),
 		blades.WithMaxIterations(a.cfg.ModelMaxIterations),
@@ -322,9 +323,6 @@ func (a *App) buildTools() ([]tools.Tool, error) {
 	if err := addFuncTool(&allTools, "write_todos", "Create or replace structured todo list for current task. Use statuses: pending, in_progress, completed.", a.handleWriteTodosTool); err != nil {
 		return nil, err
 	}
-	if err := addFuncTool(&allTools, "bash", "Run shell command in workspace.", a.handleBashTool); err != nil {
-		return nil, err
-	}
 	if err := addFuncTool(&allTools, "fs_read", "Read file content from workspace.", a.handleFSReadTool); err != nil {
 		return nil, err
 	}
@@ -364,13 +362,14 @@ func (a *App) systemInstruction() string {
 <runtime_contract>
 1. Use tool calls for all actions (file ops, shell, tape, skills, scheduling).
 2. Do not emit comma-prefixed commands in normal flow; use tool calls instead.
-3. If a compatibility fallback is required, runtime can still parse comma commands.
+3. Comma-prefixed commands are handled only when they match registered runtime commands.
 4. Never emit '<command ...>' blocks yourself; those are runtime-generated.
 5. When enough evidence is collected, return plain natural language answer.
 6. Use '$name' hints to request detail expansion for tools/skills when needed.
-7. The "bash" tool is available in this runtime; do not claim shell access is unavailable when bash can be used.
-8. If the user asks for runtime/system information, first call "bash" with safe read-only commands (for example: uname -a, cat /etc/os-release) and then summarize outputs.
+7. The "bash" skill is available in this runtime; do not claim shell access is unavailable when the bash skill can be used.
+8. If the user asks for runtime/system information, first use the bash skill with safe read-only commands (for example: uname -a, cat /etc/os-release) and then summarize outputs.
 9. Please continuously maintain "write_todos" and update task progress in time during the task.
+10. Current workspace root: {{.workspace}}
 </runtime_contract>
 <context_contract>
 Treat the current user message as your starting point.
@@ -496,6 +495,7 @@ func (a *App) onUpdate(ctx context.Context, _ *bot.Bot, update *models.Update) {
 	inbox.session.SetState("channel", "telegram")
 	inbox.session.SetState("chat_id", msg.Chat.ID)
 	inbox.session.SetState("message_thread_id", msg.MessageThreadID)
+	inbox.session.SetState("workspace", a.workDir)
 	if msg.From != nil {
 		inbox.session.SetState("sender_id", msg.From.ID)
 		if msg.From.Username != "" {
