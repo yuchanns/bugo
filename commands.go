@@ -581,37 +581,29 @@ func (a *App) minimalShellEnv() []string {
 }
 
 func (a *App) minimalShellEnvMap() map[string]string {
-	keys := append([]string(nil), defaultShellEnvKeys...)
-	if len(a.cfg.BashAllowEnv) > 0 {
-		keys = append(keys, a.cfg.BashAllowEnv...)
+	deny := map[string]struct{}{
+		"BUGO_API_KEY": {},
 	}
-	env := make(map[string]string, len(keys))
-	for _, key := range keys {
+	for _, key := range a.cfg.BashDenyEnv {
 		key = strings.TrimSpace(key)
 		if key == "" {
 			continue
 		}
-		if _, exists := env[key]; exists {
+		deny[key] = struct{}{}
+	}
+
+	env := make(map[string]string)
+	for _, item := range os.Environ() {
+		key, value, ok := strings.Cut(item, "=")
+		if !ok {
 			continue
 		}
-		if value, ok := os.LookupEnv(key); ok {
-			env[key] = value
+		if _, blocked := deny[key]; blocked {
+			continue
 		}
+		env[key] = value
 	}
 	return env
-}
-
-var defaultShellEnvKeys = []string{
-	"PATH",
-	"LANG",
-	"LC_ALL",
-	"HOME",
-	"TMPDIR",
-	"TZ",
-	"DISPLAY",
-	"WAYLAND_DISPLAY",
-	"XAUTHORITY",
-	"XDG_RUNTIME_DIR",
 }
 
 func (a *App) resolveWorkspacePath(raw string) (string, error) {

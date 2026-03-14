@@ -31,7 +31,7 @@ type Config struct {
 	APIBase            string
 	WorkDir            string
 	HomeDir            string
-	BashAllowEnv       []string
+	BashDenyEnv        []string
 }
 
 func LoadConfig() (Config, error) {
@@ -49,23 +49,20 @@ func LoadConfig() (Config, error) {
 		WorkDir:            env("BUGO_WORKDIR"),
 		HomeDir:            resolveHomeDir(firstNonEmpty(env("BUGO_HOME"), "~/.bugo")),
 	}
-	bashAllowEnv, err := parseEnvNameList(env("BUGO_BASH_ALLOW_ENV"))
+	bashDenyEnv, err := parseEnvNameList(env("BUGO_BASH_DENY_ENV"))
 	if err != nil {
-		return Config{}, fmt.Errorf("parse bash allow env: %w", err)
+		return Config{}, fmt.Errorf("parse bash deny env: %w", err)
 	}
-	cfg.BashAllowEnv = bashAllowEnv
+	cfg.BashDenyEnv = bashDenyEnv
 
-	cfg.APIKey = firstNonEmpty(env("BUGO_API_KEY"), env("OPENROUTER_API_KEY"), env("OPENAI_API_KEY"))
+	cfg.APIKey = env("BUGO_API_KEY")
 	cfg.APIBase = env("BUGO_API_BASE")
-	if cfg.APIBase == "" && env("OPENROUTER_API_KEY") != "" {
-		cfg.APIBase = "https://openrouter.ai/api/v1"
-	}
 
 	if cfg.TelegramToken == "" {
 		return Config{}, fmt.Errorf("missing telegram token, set BUGO_TELEGRAM_TOKEN")
 	}
 	if cfg.APIKey == "" {
-		return Config{}, fmt.Errorf("missing model api key, set BUGO_API_KEY (or OPENROUTER_API_KEY/OPENAI_API_KEY)")
+		return Config{}, fmt.Errorf("missing model api key, set BUGO_API_KEY")
 	}
 
 	allowChats, err := parseInt64Set(env("BUGO_TELEGRAM_ALLOW_CHATS"))

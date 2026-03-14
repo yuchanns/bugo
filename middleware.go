@@ -29,7 +29,7 @@ const (
 
 func agentRetryMiddleware() blades.Middleware {
 	return bladesmiddleware.Retry(
-		2,
+		5,
 		kitretry.WithBaseDelay(300*time.Millisecond),
 		kitretry.WithMaxDelay(2*time.Second),
 		kitretry.WithRetryable(isRetryableAgentError),
