@@ -115,6 +115,8 @@ type todoItem struct {
 	Status  string `json:"status"`
 }
 
+const maxCompletedTodos = 3
+
 type writeTodosToolInput struct {
 	Todos []todoItem `json:"todos"`
 }
@@ -124,6 +126,7 @@ func (a *App) handleWriteTodosTool(ctx context.Context, in writeTodosToolInput) 
 	if err != nil {
 		return "", err
 	}
+	normalized = pruneCompletedTodos(normalized, maxCompletedTodos)
 	if s, ok := blades.FromSessionContext(ctx); ok && s != nil {
 		s.SetState("todos", normalized)
 	}
@@ -153,6 +156,37 @@ func normalizeTodos(items []todoItem) ([]todoItem, error) {
 		})
 	}
 	return out, nil
+}
+
+func pruneCompletedTodos(items []todoItem, limit int) []todoItem {
+	if limit < 0 || len(items) == 0 {
+		return items
+	}
+
+	completedIndexes := make([]int, 0, len(items))
+	for i, item := range items {
+		if item.Status == "completed" {
+			completedIndexes = append(completedIndexes, i)
+		}
+	}
+	if len(completedIndexes) <= limit {
+		return items
+	}
+
+	dropUntil := len(completedIndexes) - limit
+	dropped := make(map[int]struct{}, dropUntil)
+	for _, idx := range completedIndexes[:dropUntil] {
+		dropped[idx] = struct{}{}
+	}
+
+	out := make([]todoItem, 0, len(items)-dropUntil)
+	for i, item := range items {
+		if _, ok := dropped[i]; ok {
+			continue
+		}
+		out = append(out, item)
+	}
+	return out
 }
 
 type scheduleAddToolInput struct {
