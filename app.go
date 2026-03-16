@@ -22,7 +22,9 @@ import (
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 	"github.com/openai/openai-go/v3/option"
+	"github.com/yuchanns/bugo/contrib/codexauth"
 	log "github.com/yuchanns/bugo/internal/logging"
+	"github.com/yuchanns/bugo/internal/modelparts"
 	"github.com/yuchanns/bugo/internal/runtime"
 )
 
@@ -37,6 +39,7 @@ type App struct {
 	skills   []skills.Skill
 	schedule *ScheduleStore
 	workDir  string
+	codex    *codexauth.Provider
 	agentMu  sync.RWMutex
 }
 
@@ -112,15 +115,10 @@ func resolveExternalSkillsDir(workDir string) (string, error) {
 }
 
 func (a *App) buildAgent() (blades.Agent, error) {
-	modelConfig := openai.Config{
-		BaseURL:         a.cfg.APIBase,
-		APIKey:          a.cfg.APIKey,
-		MaxOutputTokens: int64(a.cfg.MaxOutputTokens),
-		RequestOptions: []option.RequestOption{
-			option.WithHTTPClient(newOpenAIHTTPClient()),
-		},
+	model, err := a.buildModelProvider()
+	if err != nil {
+		return nil, err
 	}
-	model := openai.NewModel(a.cfg.Model, modelConfig)
 	model = newModel(model, a.inboxes)
 
 	baseTools, err := a.buildTools()
@@ -152,6 +150,39 @@ func (a *App) buildAgent() (blades.Agent, error) {
 		),
 		blades.WithMaxIterations(a.cfg.ModelMaxIterations),
 	)
+}
+
+func (a *App) buildModelProvider() (blades.ModelProvider, error) {
+	switch a.cfg.Provider {
+	case "openai":
+		a.codex = nil
+		modelConfig := openai.Config{
+			BaseURL:         a.cfg.APIBase,
+			APIKey:          a.cfg.APIKey,
+			MaxOutputTokens: int64(a.cfg.MaxOutputTokens),
+			RequestOptions: []option.RequestOption{
+				option.WithHTTPClient(newOpenAIHTTPClient()),
+			},
+		}
+		return openai.NewModel(a.cfg.Model, modelConfig), nil
+	case "codex":
+		if a.codex != nil && a.codex.Name() == a.cfg.Model {
+			return a.codex, nil
+		}
+		provider, err := codexauth.New(codexauth.Config{
+			Model:           a.cfg.Model,
+			AuthFile:        a.cfg.CodexAuthFile,
+			MaxOutputTokens: int64(a.cfg.MaxOutputTokens),
+			HTTPClient:      newOpenAIHTTPClient(),
+		})
+		if err != nil {
+			return nil, err
+		}
+		a.codex = provider
+		return provider, nil
+	default:
+		return nil, fmt.Errorf("unsupported provider %q", a.cfg.Provider)
+	}
 }
 
 func newOpenAIHTTPClient() *http.Client {
@@ -467,8 +498,9 @@ func (a *App) onUpdate(ctx context.Context, _ *bot.Bot, update *models.Update) {
 	}
 	if !a.isSenderAllowed(msg.From) {
 		_, _ = a.bot.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID: msg.Chat.ID,
-			Text:   "Access denied.",
+			ChatID:    msg.Chat.ID,
+			Text:      modelparts.EscapeTelegramMarkdown("Access denied."),
+			ParseMode: models.ParseModeMarkdown,
 		})
 		return
 	}
@@ -478,8 +510,9 @@ func (a *App) onUpdate(ctx context.Context, _ *bot.Bot, update *models.Update) {
 	}
 	if content == "/start" {
 		_, _ = a.bot.SendMessage(ctx, &bot.SendMessageParams{
-			ChatID: msg.Chat.ID,
-			Text:   "Bugo is online. Send text to start.",
+			ChatID:    msg.Chat.ID,
+			Text:      modelparts.EscapeTelegramMarkdown("Bugo is online. Send text to start."),
+			ParseMode: models.ParseModeMarkdown,
 		})
 		return
 	}
@@ -707,6 +740,7 @@ func (a *App) runModelPrompt(inbox *sessionInbox, session *TapeSession, chatID i
 		segmentStream  strings.Builder
 		segmentFinal   string
 		allOutput      strings.Builder
+		renderState    modelparts.TelegramTextRenderState
 		segmentVersion = inbox.segment()
 	)
 	defer streamer.Stop()
@@ -748,17 +782,18 @@ func (a *App) runModelPrompt(inbox *sessionInbox, session *TapeSession, chatID i
 			streamer = runtime.NewTelegramDraftStreamer(a.bot, chatID, threadID)
 			segmentStream.Reset()
 			segmentFinal = ""
+			renderState = modelparts.TelegramTextRenderState{}
 			segmentVersion = currentVersion
 		}
 
-		text := out.Text()
+		text := modelparts.FormatTelegramVisibleDelta(out.Parts, &renderState)
 		if text == "" {
 			continue
 		}
 
 		switch out.Status {
 		case blades.StatusCompleted:
-			segmentFinal = text
+			segmentFinal = modelparts.FormatTelegramVisibleMessage(out.Parts)
 		case blades.StatusIncomplete, blades.StatusInProgress:
 			segmentStream.WriteString(text)
 			if err := streamer.Append(ctx, text); err != nil {
@@ -788,16 +823,17 @@ func finalizeAssistantSegment(ctx context.Context, streamer *runtime.TelegramDra
 	if segmentStream != nil {
 		streamed = strings.TrimSpace(segmentStream.String())
 	}
-	if streamed == "" && strings.TrimSpace(segmentFinal) == "" {
+	finalText := strings.TrimSpace(segmentFinal)
+	if finalText == "" {
+		finalText = streamed
+	}
+	if strings.TrimSpace(finalText) == "" {
 		return "", nil
 	}
-	if err := streamer.Finalize(ctx, segmentFinal); err != nil {
+	if err := streamer.Finalize(ctx, finalText); err != nil {
 		return "", err
 	}
-	if strings.TrimSpace(segmentFinal) != "" {
-		return strings.TrimSpace(segmentFinal), nil
-	}
-	return streamed, nil
+	return strings.TrimSpace(finalText), nil
 }
 
 func (a *App) startTyping(chatID int64) func() {
@@ -830,7 +866,8 @@ func (a *App) sendText(ctx context.Context, chatID int64, threadID int, text str
 		if _, err := a.bot.SendMessage(ctx, &bot.SendMessageParams{
 			ChatID:          chatID,
 			MessageThreadID: threadID,
-			Text:            part,
+			Text:            modelparts.EscapeTelegramMarkdown(part),
+			ParseMode:       models.ParseModeMarkdown,
 		}); err != nil {
 			return err
 		}

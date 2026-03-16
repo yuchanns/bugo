@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	defaultModel         = "gpt-4o-mini"
+	defaultModelRef      = "openai:gpt-4o-mini"
 	defaultMaxIterations = int(^uint(0) >> 1)
 )
 
@@ -23,17 +23,25 @@ type Config struct {
 	DebounceSeconds    int
 	MessageDelay       int
 	ActiveWindow       int
+	Provider           string
 	Model              string
 	ModelMaxIterations int
 	MaxOutputTokens    int
 	PromptTokenLimit   int
 	APIKey             string
 	APIBase            string
+	CodexAuthFile      string
 	WorkDir            string
 	HomeDir            string
 }
 
 func LoadConfig() (Config, error) {
+	modelRef := firstNonEmpty(env("BUGO_MODEL"), defaultModelRef)
+	provider, model, err := parseModelRef(modelRef)
+	if err != nil {
+		return Config{}, err
+	}
+
 	cfg := Config{
 		TelegramToken:      env("BUGO_TELEGRAM_TOKEN"),
 		TelegramProxy:      env("BUGO_TELEGRAM_PROXY"),
@@ -41,7 +49,8 @@ func LoadConfig() (Config, error) {
 		DebounceSeconds:    intEnv("BUGO_DEBOUNCE_SECONDS", 1),
 		MessageDelay:       intEnv("BUGO_MESSAGE_DELAY_SECONDS", 10),
 		ActiveWindow:       intEnv("BUGO_ACTIVE_WINDOW_SECONDS", 60),
-		Model:              firstNonEmpty(env("BUGO_MODEL"), defaultModel),
+		Provider:           provider,
+		Model:              model,
 		ModelMaxIterations: intEnv("BUGO_MAX_ITERATIONS", defaultMaxIterations),
 		MaxOutputTokens:    intEnv("BUGO_MAX_OUTPUT_TOKENS", 1024),
 		PromptTokenLimit:   intEnv("BUGO_PROMPT_TOKEN_LIMIT", 0),
@@ -50,12 +59,19 @@ func LoadConfig() (Config, error) {
 	}
 	cfg.APIKey = env("BUGO_API_KEY")
 	cfg.APIBase = env("BUGO_API_BASE")
+	cfg.CodexAuthFile = resolveHomeDir(firstNonEmpty(
+		env("BUGO_CODEX_AUTH_FILE"),
+		filepath.Join(cfg.HomeDir, "providers", "openai-codex-auth.json"),
+	))
 
 	if cfg.TelegramToken == "" {
 		return Config{}, fmt.Errorf("missing telegram token, set BUGO_TELEGRAM_TOKEN")
 	}
-	if cfg.APIKey == "" {
+	if cfg.Provider == "openai" && cfg.APIKey == "" {
 		return Config{}, fmt.Errorf("missing model api key, set BUGO_API_KEY")
+	}
+	if cfg.Provider != "openai" && cfg.Provider != "codex" {
+		return Config{}, fmt.Errorf("unsupported provider %q", cfg.Provider)
 	}
 
 	allowChats, err := parseInt64Set(env("BUGO_TELEGRAM_ALLOW_CHATS"))
@@ -66,6 +82,23 @@ func LoadConfig() (Config, error) {
 
 	cfg.AllowFrom = parseStringSet(env("BUGO_TELEGRAM_ALLOW_FROM"))
 	return cfg, nil
+}
+
+func parseModelRef(raw string) (string, string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", "", fmt.Errorf("BUGO_MODEL is required")
+	}
+	provider, model, ok := strings.Cut(raw, ":")
+	if !ok {
+		return "openai", raw, nil
+	}
+	provider = strings.TrimSpace(provider)
+	model = strings.TrimSpace(model)
+	if provider == "" || model == "" {
+		return "", "", fmt.Errorf("BUGO_MODEL must be provider:model, got %q", raw)
+	}
+	return provider, model, nil
 }
 
 func env(key string) string {

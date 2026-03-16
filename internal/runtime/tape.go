@@ -18,6 +18,7 @@ import (
 
 	"github.com/go-kratos/blades"
 	"github.com/google/uuid"
+	"github.com/yuchanns/bugo/internal/modelparts"
 )
 
 type TapeRecord struct {
@@ -412,6 +413,11 @@ func encodeMessageParts(parts []blades.Part) []map[string]any {
 	out := make([]map[string]any, 0, len(parts))
 	for _, part := range parts {
 		switch v := part.(type) {
+		case modelparts.ReasoningPart:
+			out = append(out, map[string]any{
+				"type":           "reasoning",
+				"reasoning_text": v.ReasoningText,
+			})
 		case blades.TextPart:
 			out = append(out, map[string]any{
 				"type": "text",
@@ -509,6 +515,10 @@ func decodeMessageParts(value any) []blades.Part {
 			continue
 		}
 		switch strings.TrimSpace(stringFromAny(obj["type"])) {
+		case "reasoning":
+			parts = append(parts, modelparts.ReasoningPart{
+				ReasoningText: stringFromAny(obj["reasoning_text"]),
+			})
 		case "text":
 			parts = append(parts, blades.TextPart{
 				Text: stringFromAny(obj["text"]),

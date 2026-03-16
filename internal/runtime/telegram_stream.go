@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/go-telegram/bot"
+	"github.com/go-telegram/bot/models"
 	log "github.com/yuchanns/bugo/internal/logging"
 )
 
@@ -152,6 +153,7 @@ func (s *TelegramDraftStreamer) sendFinal(ctx context.Context, text string) erro
 			ChatID:          s.chatID,
 			MessageThreadID: s.threadID,
 			Text:            part,
+			ParseMode:       models.ParseModeMarkdown,
 		}); err != nil {
 			return err
 		}
@@ -174,6 +176,7 @@ func (s *TelegramDraftStreamer) sendDraftWithRetry(ctx context.Context, text str
 			MessageThreadID: s.threadID,
 			DraftID:         s.draftID,
 			Text:            text,
+			ParseMode:       models.ParseModeMarkdown,
 		})
 		if err == nil {
 			return nil

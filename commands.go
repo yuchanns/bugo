@@ -40,15 +40,19 @@ var builtinCommandSpecs = map[string]commandSpec{
 		Description: "Remove a scheduled job",
 		Usage:       ",schedule.remove job_id=my-job",
 	},
-	"tape.handoff":  {Name: "tape.handoff", Description: "Create anchor handoff", Usage: ",tape.handoff name=phase-1 summary='Bootstrap complete'"},
-	"tape.anchors":  {Name: "tape.anchors", Description: "List tape anchors", Usage: ",tape.anchors"},
-	"tape.info":     {Name: "tape.info", Description: "Show tape summary", Usage: ",tape.info"},
-	"tape.search":   {Name: "tape.search", Description: "Search tape entries", Usage: ",tape.search query=error"},
-	"tape.recent":   {Name: "tape.recent", Description: "Show recent tape entries (compat)", Usage: ",tape.recent limit=10"},
-	"tape.reset":    {Name: "tape.reset", Description: "Reset tape", Usage: ",tape.reset archive=true"},
-	"skills.list":   {Name: "skills.list", Description: "List discovered skills", Usage: ",skills.list"},
-	"skills.reload": {Name: "skills.reload", Description: "Reload skills and rebuild runner", Usage: ",skills.reload"},
-	"quit":          {Name: "quit", Description: "Exit program (CLI semantics)", Usage: ",quit"},
+	"codex.login":          {Name: "codex.login", Description: "Start OpenAI Codex OAuth login", Usage: ",codex.login"},
+	"codex.login.complete": {Name: "codex.login.complete", Description: "Complete OpenAI Codex OAuth login with callback URL or code", Usage: ",codex.login.complete url='http://localhost:1455/auth/callback?code=...&state=...'"},
+	"codex.status":         {Name: "codex.status", Description: "Show OpenAI Codex auth status", Usage: ",codex.status"},
+	"codex.logout":         {Name: "codex.logout", Description: "Clear OpenAI Codex auth state", Usage: ",codex.logout"},
+	"tape.handoff":         {Name: "tape.handoff", Description: "Create anchor handoff", Usage: ",tape.handoff name=phase-1 summary='Bootstrap complete'"},
+	"tape.anchors":         {Name: "tape.anchors", Description: "List tape anchors", Usage: ",tape.anchors"},
+	"tape.info":            {Name: "tape.info", Description: "Show tape summary", Usage: ",tape.info"},
+	"tape.search":          {Name: "tape.search", Description: "Search tape entries", Usage: ",tape.search query=error"},
+	"tape.recent":          {Name: "tape.recent", Description: "Show recent tape entries (compat)", Usage: ",tape.recent limit=10"},
+	"tape.reset":           {Name: "tape.reset", Description: "Reset tape", Usage: ",tape.reset archive=true"},
+	"skills.list":          {Name: "skills.list", Description: "List discovered skills", Usage: ",skills.list"},
+	"skills.reload":        {Name: "skills.reload", Description: "Reload skills and rebuild runner", Usage: ",skills.reload"},
+	"quit":                 {Name: "quit", Description: "Exit program (CLI semantics)", Usage: ",quit"},
 }
 
 var commandAliases = map[string]string{
@@ -169,6 +173,14 @@ func (a *App) executeCommand(ctx context.Context, inbox *sessionInbox, content s
 		return a.execScheduleList(inbox), nil
 	case "schedule.remove":
 		return a.execScheduleRemove(inbox, parsed)
+	case "codex.login":
+		return a.execCodexLogin()
+	case "codex.login.complete":
+		return a.execCodexLoginComplete(parsed)
+	case "codex.status":
+		return a.execCodexStatus()
+	case "codex.logout":
+		return a.execCodexLogout()
 	case "skills.list":
 		return a.execSkillsList(), nil
 	case "skills.reload":
@@ -426,6 +438,60 @@ func (a *App) execScheduleRemove(inbox *sessionInbox, parsed parsedCommandArgs) 
 		return "job not found", nil
 	}
 	return fmt.Sprintf("removed job: %s", jobID), nil
+}
+
+func (a *App) execCodexLogin() (string, error) {
+	if a.codex == nil {
+		return "", fmt.Errorf("codex provider is not active; set BUGO_MODEL=codex:<model>")
+	}
+	authURL, err := a.codex.StartLogin()
+	if err != nil {
+		return "", err
+	}
+	return strings.Join([]string{
+		"Open this URL in a browser:",
+		authURL,
+		"If callback works, authentication will finish automatically.",
+		"If callback fails, copy the final callback URL or the code value and run ,codex.login.complete ...",
+		"Then run ,codex.status.",
+	}, "\n"), nil
+}
+
+func (a *App) execCodexLoginComplete(parsed parsedCommandArgs) (string, error) {
+	if a.codex == nil {
+		return "", fmt.Errorf("codex provider is not active; set BUGO_MODEL=codex:<model>")
+	}
+	raw := strings.TrimSpace(parsed.Kwargs["url"])
+	if raw == "" {
+		raw = strings.TrimSpace(parsed.Kwargs["code"])
+	}
+	if raw == "" && len(parsed.Positional) > 0 {
+		raw = strings.TrimSpace(strings.Join(parsed.Positional, " "))
+	}
+	if raw == "" {
+		return "", fmt.Errorf("url or code is required")
+	}
+	if err := a.codex.CompleteLogin(context.Background(), raw); err != nil {
+		return "", err
+	}
+	return "codex auth completed", nil
+}
+
+func (a *App) execCodexStatus() (string, error) {
+	if a.codex == nil {
+		return "", fmt.Errorf("codex provider is not active; set BUGO_MODEL=codex:<model>")
+	}
+	return a.codex.Status(), nil
+}
+
+func (a *App) execCodexLogout() (string, error) {
+	if a.codex == nil {
+		return "", fmt.Errorf("codex provider is not active; set BUGO_MODEL=codex:<model>")
+	}
+	if err := a.codex.Logout(); err != nil {
+		return "", err
+	}
+	return "codex auth cleared", nil
 }
 
 func (a *App) execSkillsList() string {

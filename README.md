@@ -31,7 +31,28 @@ go install github.com/yuchanns/bugo@latest
 ```bash
 export BUGO_TELEGRAM_TOKEN="123456:xxxx"
 export BUGO_API_KEY="sk-xxxx"
+export BUGO_MODEL="openai:gpt-4o-mini"
 bugo
+```
+
+For Codex OAuth:
+
+```bash
+export BUGO_TELEGRAM_TOKEN="123456:xxxx"
+export BUGO_MODEL="codex:gpt-5.3-codex"
+bugo
+```
+
+Then trigger login from Telegram with:
+
+```text
+,codex.login
+```
+
+If the browser callback cannot reach the running `bugo` process, copy the final callback URL or just the `code` value and complete it manually:
+
+```text
+,codex.login.complete url="http://localhost:1455/auth/callback?code=...&state=..."
 ```
 
 ## Runtime Behavior
@@ -60,6 +81,10 @@ Examples:
 ,tape.handoff summary="checkpoint"
 ,schedule.list
 ,skills.list
+,codex.login
+,codex.login.complete url="http://localhost:1455/auth/callback?code=...&state=..."
+,codex.status
+,codex.logout
 ```
 
 ## Skills
@@ -72,9 +97,10 @@ Examples:
 ## Runtime Environment Variables
 
 - `BUGO_TELEGRAM_TOKEN`: Telegram bot token
-- `BUGO_API_KEY`: model provider key
+- `BUGO_API_KEY`: model provider key, required when `BUGO_MODEL` uses `openai:*`
 - `BUGO_API_BASE`: optional provider base URL
-- `BUGO_MODEL`: model name, default `gpt-4o-mini`
+- `BUGO_MODEL`: required model reference in `provider:model` form, default `openai:gpt-4o-mini`
+- `BUGO_CODEX_AUTH_FILE`: optional Codex OAuth token file, default `~/.bugo/providers/openai-codex-auth.json`
 - `BUGO_MAX_ITERATIONS`: max agent iterations
 - `BUGO_MAX_OUTPUT_TOKENS`: max model output tokens
 - `BUGO_PROMPT_TOKEN_LIMIT`: optional soft prompt budget for context-pressure hints
@@ -86,6 +112,7 @@ Examples:
 ## Storage
 
 - Tape files: `~/.bugo/tapes/*.jsonl`
+- Codex auth file: `~/.bugo/providers/openai-codex-auth.json`
 - Each session maps to one append-only JSONL tape
 
 ## Development

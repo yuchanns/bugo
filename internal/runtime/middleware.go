@@ -21,6 +21,7 @@ import (
 	"github.com/openai/openai-go/v3"
 	"github.com/pkoukk/tiktoken-go"
 	log "github.com/yuchanns/bugo/internal/logging"
+	"github.com/yuchanns/bugo/internal/modelparts"
 )
 
 const tapeContextMessageLimit = 10
@@ -210,6 +211,8 @@ func appendMessageToBudgetText(buf *strings.Builder, msg *blades.Message) {
 	buf.WriteByte('\n')
 	for _, part := range msg.Parts {
 		switch v := part.(type) {
+		case modelparts.ReasoningPart:
+			continue
 		case blades.TextPart:
 			buf.WriteString(v.Text)
 		case blades.FilePart:
