@@ -24,8 +24,6 @@ import (
 	"github.com/yuchanns/bugo/internal/modelparts"
 )
 
-const tapeContextMessageLimit = 10
-
 const (
 	contextBudgetWarnRatio     = 0.80
 	contextBudgetCriticalRatio = 0.90
@@ -284,7 +282,7 @@ Prefer concise reasoning, avoid unnecessary retrieval, and use tape_handoff befo
 	}
 }
 
-func TapeContextMiddleware(tapes *TapeStore) blades.Middleware {
+func TapeContextMiddleware(tapes *TapeStore, limit int) blades.Middleware {
 	return func(next blades.Handler) blades.Handler {
 		return blades.HandleFunc(func(ctx context.Context, invocation *blades.Invocation) blades.Generator[*blades.Message, error] {
 			if invocation == nil || invocation.Session == nil || tapes == nil {
@@ -318,7 +316,7 @@ func TapeContextMiddleware(tapes *TapeStore) blades.Middleware {
 				}
 				history = filtered
 			}
-			history = tailMessages(history, tapeContextMessageLimit)
+			history = tailMessages(history, limit)
 			if len(history) == 0 {
 				return next.Handle(ctx, invocation)
 			}

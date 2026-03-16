@@ -141,7 +141,7 @@ func (a *App) buildAgent() (blades.Agent, error) {
 		blades.WithSkills(skillList...),
 		blades.WithMiddleware(
 			runtime.AgentRetryMiddleware(),
-			runtime.TapeContextMiddleware(a.tapes),
+			runtime.TapeContextMiddleware(a.tapes, a.cfg.TapeContextLimit),
 			workspaceAgentsPromptMiddleware(a.workDir),
 			runtime.ContextBudgetMiddleware(a.cfg.Model, a.cfg.PromptTokenLimit),
 			runtime.SkillToolLoggingMiddleware(),
