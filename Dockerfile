@@ -14,6 +14,17 @@ COPY . .
 RUN --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOFLAGS=-mod=readonly go build -trimpath -ldflags="-s -w" -o /out/bugo .
 
+FROM debian:bookworm-slim AS rtk-installer
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    tar \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh \
+    | RTK_INSTALL_DIR=/out sh
+
 FROM debian:bookworm-slim
 
 ARG BUGO_UID=1000
@@ -84,6 +95,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY --from=builder /out/bugo /usr/local/bin/bugo
+COPY --from=rtk-installer /out/rtk /usr/local/bin/rtk
 COPY docker/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 

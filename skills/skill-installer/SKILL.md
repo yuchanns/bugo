@@ -40,12 +40,12 @@ After installing a skill, tell the user: "Restart Bugo to pick up new skills."
 
 All of these commands use network.
 
-- List curated skills: `npx skills add openai/skills --list --skill '*' --agent antigravity --yes`
-- List experimental skills: `npx skills add https://github.com/openai/skills/tree/main/skills/.experimental --list --skill '*' --agent antigravity --yes`
-- Install curated skill (project-local): `npx skills add https://github.com/openai/skills/tree/main/skills/.curated/<skill-name> --agent antigravity --yes`
-- Install curated skill (global): `npx skills add https://github.com/openai/skills/tree/main/skills/.curated/<skill-name> --agent antigravity --yes --global`
-- Install from URL: `npx skills add https://github.com/<owner>/<repo>/tree/<ref>/<path> --agent antigravity --yes`
-- Install from shorthand: `npx skills add <owner>/<repo>@<skill-name> --agent antigravity --yes`
+- List curated skills: `npx skills add openai/skills --list --skill '*' --agent codex --yes`
+- List experimental skills: `npx skills add https://github.com/openai/skills/tree/main/skills/.experimental --list --skill '*' --agent codex --yes`
+- Install curated skill (project-local): `npx skills add https://github.com/openai/skills/tree/main/skills/.curated/<skill-name> --agent codex --yes`
+- Install curated skill (global): `npx skills add https://github.com/openai/skills/tree/main/skills/.curated/<skill-name> --agent codex --yes --global`
+- Install from URL: `npx skills add https://github.com/<owner>/<repo>/tree/<ref>/<path> --agent codex --yes`
+- Install from shorthand: `npx skills add <owner>/<repo>@<skill-name> --agent codex --yes`
 - Show installed skills in current scope: `npx skills list`
 - Show installed global skills: `npx skills list --global`
 
@@ -53,7 +53,7 @@ All of these commands use network.
 
 - `npx skills add` handles discovery and installation directly.
 - Use project scope by default; use `--global` for cross-workspace availability.
-- Always pass `--agent antigravity` so install location matches Bugo discovery (`.agents/skills`).
+- Always pass `--agent codex` so install location matches Bugo discovery (`.agents/skills`).
 - Prefer non-interactive usage with `--yes` when you already know the target skill.
 
 ## Notes
