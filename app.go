@@ -65,9 +65,7 @@ func NewApp(cfg Config) (*App, error) {
 		inboxes:  newInboxHub(sessions),
 		workDir:  workDir,
 	}
-	app.schedule, err = NewScheduleStore(func(sessionID string, chatID int64, message string) {
-		app.handleScheduledMessage(sessionID, chatID, message)
-	})
+	app.schedule, err = NewScheduleStore(app.handleScheduledMessage)
 	if err != nil {
 		return nil, err
 	}
