@@ -41,19 +41,26 @@ var builtinCommandSpecs = map[string]commandSpec{
 		Description: "Remove a scheduled job",
 		Usage:       ",schedule.remove job_id=my-job",
 	},
+	"tape.handoff":  {Name: "tape.handoff", Description: "Create handoff anchor", Usage: ",tape.handoff name=phase-1 summary='Bootstrap complete'"},
+	"tape.anchors":  {Name: "tape.anchors", Description: "List tape anchors", Usage: ",tape.anchors"},
+	"tape.info":     {Name: "tape.info", Description: "Show tape summary", Usage: ",tape.info"},
+	"tape.search":   {Name: "tape.search", Description: "Search tape entries", Usage: ",tape.search query=error"},
+	"tape.recent":   {Name: "tape.recent", Description: "Show recent tape entries (compat)", Usage: ",tape.recent limit=10"},
+	"tape.reset":    {Name: "tape.reset", Description: "Reset tape", Usage: ",tape.reset archive=true"},
+	"skills.list":   {Name: "skills.list", Description: "List discovered skills", Usage: ",skills.list"},
+	"skills.reload": {Name: "skills.reload", Description: "Reload skills and rebuild runner", Usage: ",skills.reload"},
+	"quit":          {Name: "quit", Description: "Exit program (CLI semantics)", Usage: ",quit"},
+}
+
+var codexCommandSpecs = map[string]commandSpec{
 	"codex.login":          {Name: "codex.login", Description: "Start OpenAI Codex OAuth login", Usage: ",codex.login"},
 	"codex.login.complete": {Name: "codex.login.complete", Description: "Complete OpenAI Codex OAuth login with callback URL or code", Usage: ",codex.login.complete url='http://localhost:1455/auth/callback?code=...&state=...'"},
 	"codex.status":         {Name: "codex.status", Description: "Show OpenAI Codex auth status", Usage: ",codex.status"},
 	"codex.logout":         {Name: "codex.logout", Description: "Clear OpenAI Codex auth state", Usage: ",codex.logout"},
-	"tape.handoff":         {Name: "tape.handoff", Description: "Create handoff anchor", Usage: ",tape.handoff name=phase-1 summary='Bootstrap complete'"},
-	"tape.anchors":         {Name: "tape.anchors", Description: "List tape anchors", Usage: ",tape.anchors"},
-	"tape.info":            {Name: "tape.info", Description: "Show tape summary", Usage: ",tape.info"},
-	"tape.search":          {Name: "tape.search", Description: "Search tape entries", Usage: ",tape.search query=error"},
-	"tape.recent":          {Name: "tape.recent", Description: "Show recent tape entries (compat)", Usage: ",tape.recent limit=10"},
-	"tape.reset":           {Name: "tape.reset", Description: "Reset tape", Usage: ",tape.reset archive=true"},
-	"skills.list":          {Name: "skills.list", Description: "List discovered skills", Usage: ",skills.list"},
-	"skills.reload":        {Name: "skills.reload", Description: "Reload skills and rebuild runner", Usage: ",skills.reload"},
-	"quit":                 {Name: "quit", Description: "Exit program (CLI semantics)", Usage: ",quit"},
+}
+
+var providerExtendCommands = map[string]map[string]commandSpec{
+	"codex": codexCommandSpecs,
 }
 
 var commandAliases = map[string]string{
@@ -61,6 +68,19 @@ var commandAliases = map[string]string{
 	"tape":    "tape.info",
 	"handoff": "tape.handoff",
 	"anchors": "tape.anchors",
+}
+
+func (a *App) availableCommandSpecs() map[string]commandSpec {
+	specs := make(map[string]commandSpec, len(builtinCommandSpecs)+len(codexCommandSpecs))
+	for name, spec := range builtinCommandSpecs {
+		specs[name] = spec
+	}
+	if extendCommands, ok := providerExtendCommands[a.cfg.Provider]; ok {
+		for name, spec := range extendCommands {
+			specs[name] = spec
+		}
+	}
+	return specs
 }
 
 func (a *App) handleScheduledMessage(sessionID string, chatID int64, message string) {
@@ -144,7 +164,7 @@ func (a *App) executeCommand(ctx context.Context, inbox *sessionInbox, content s
 		name = aliased
 	}
 
-	if _, ok := builtinCommandSpecs[name]; !ok {
+	if _, ok := a.availableCommandSpecs()[name]; !ok {
 		return "", fmt.Errorf("unsupported command: %s", name)
 	}
 
@@ -200,8 +220,9 @@ func (a *App) executeCommand(ctx context.Context, inbox *sessionInbox, content s
 }
 
 func (a *App) commandHelpText() string {
-	names := make([]string, 0, len(builtinCommandSpecs))
-	for name := range builtinCommandSpecs {
+	specs := a.availableCommandSpecs()
+	names := make([]string, 0, len(specs))
+	for name := range specs {
 		names = append(names, name)
 	}
 	sort.Strings(names)
@@ -212,7 +233,7 @@ func (a *App) commandHelpText() string {
 		"Available commands:",
 	}
 	for _, name := range names {
-		spec := builtinCommandSpecs[name]
+		spec := specs[name]
 		usage := strings.TrimSpace(spec.Usage)
 		if usage == "" {
 			usage = "," + name
@@ -234,14 +255,15 @@ func (a *App) commandHelpText() string {
 }
 
 func (a *App) listToolsText() string {
-	names := make([]string, 0, len(builtinCommandSpecs))
-	for name := range builtinCommandSpecs {
+	specs := a.availableCommandSpecs()
+	names := make([]string, 0, len(specs))
+	for name := range specs {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	rows := make([]string, 0, len(names))
 	for _, name := range names {
-		spec := builtinCommandSpecs[name]
+		spec := specs[name]
 		rows = append(rows, fmt.Sprintf("%s: %s", spec.Name, spec.Description))
 	}
 	return strings.Join(rows, "\n")
@@ -252,7 +274,7 @@ func (a *App) describeToolText(parsed parsedCommandArgs) string {
 	if name == "" && len(parsed.Positional) > 0 {
 		name = strings.TrimSpace(parsed.Positional[0])
 	}
-	spec, ok := builtinCommandSpecs[name]
+	spec, ok := a.availableCommandSpecs()[name]
 	if !ok {
 		return fmt.Sprintf("unknown tool: %s", name)
 	}
