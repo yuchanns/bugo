@@ -287,10 +287,11 @@ func (a *App) reloadAgent() error {
 		return err
 	}
 	contextManager, err := runtime.NewAutoHandoffContextManager(runtime.AutoHandoffConfig{
-		Model:      a.cfg.Model,
-		MaxTokens:  a.cfg.AutoHandoffTokenLimit,
-		Summarizer: summaryModel,
-		Tapes:      a.tapes,
+		Model:         a.cfg.Model,
+		ContextWindow: a.cfg.ModelContextWindow,
+		Instruction:   a.systemInstruction(),
+		Summarizer:    summaryModel,
+		Tapes:         a.tapes,
 	})
 	if err != nil {
 		return err

@@ -7,33 +7,38 @@ import (
 
 	"github.com/go-kratos/blades"
 	"github.com/pkoukk/tiktoken-go"
+	log "github.com/yuchanns/bugo/internal/logging"
 	"github.com/yuchanns/bugo/internal/modelparts"
 )
 
 const (
-	autoHandoffBatchSize = 20
+	autoHandoffLimitPercent = 90
 
-	autoHandoffInstruction = "Please provide a concise summary of the following conversation transcript. " +
-		"Preserve key facts, decisions, and outcomes. Output only the summary."
+	autoHandoffPromptPrefix = "For this turn, do not continue the task. " +
+		"Produce only a concise handoff summary of the conversation shown above. " +
+		"Preserve key facts, decisions, important outputs, and unfinished work."
 )
 
 type AutoHandoffConfig struct {
-	Model      string
-	MaxTokens  int
-	Summarizer blades.ModelProvider
-	Tapes      *TapeStore
+	Model         string
+	ContextWindow int
+	Instruction   string
+	Summarizer    blades.ModelProvider
+	Tapes         *TapeStore
 }
 
 type AutoHandoffContextManager struct {
-	maxTokens  int
-	summarizer blades.ModelProvider
-	tapes      *TapeStore
-	encoder    *tiktoken.Tiktoken
+	contextWindow int
+	maxTokens     int
+	instruction   *blades.Message
+	summarizer    blades.ModelProvider
+	tapes         *TapeStore
+	encoder       *tiktoken.Tiktoken
 }
 
 func NewAutoHandoffContextManager(cfg AutoHandoffConfig) (*AutoHandoffContextManager, error) {
-	if cfg.MaxTokens <= 0 {
-		return nil, fmt.Errorf("auto handoff token limit must be positive")
+	if cfg.ContextWindow <= 0 {
+		return nil, fmt.Errorf("auto handoff context window must be positive")
 	}
 	if cfg.Summarizer == nil {
 		return nil, fmt.Errorf("auto handoff summarizer is required")
@@ -50,11 +55,18 @@ func NewAutoHandoffContextManager(cfg AutoHandoffConfig) (*AutoHandoffContextMan
 		return nil, fmt.Errorf("auto handoff encoder: %w", err)
 	}
 
+	maxTokens := (cfg.ContextWindow * autoHandoffLimitPercent) / 100
+	if maxTokens <= 0 {
+		return nil, fmt.Errorf("auto handoff derived token limit must be positive")
+	}
+
 	return &AutoHandoffContextManager{
-		maxTokens:  cfg.MaxTokens,
-		summarizer: cfg.Summarizer,
-		tapes:      cfg.Tapes,
-		encoder:    encoder,
+		contextWindow: cfg.ContextWindow,
+		maxTokens:     maxTokens,
+		instruction:   blades.SystemMessage(cfg.Instruction),
+		summarizer:    cfg.Summarizer,
+		tapes:         cfg.Tapes,
+		encoder:       encoder,
 	}, nil
 }
 
@@ -71,7 +83,20 @@ func (m *AutoHandoffContextManager) Prepare(ctx context.Context, messages []*bla
 	if len(history) == 0 {
 		return messages, nil
 	}
-	if m.countTokens(history) <= m.maxTokens {
+	tokenCount := m.countTokens(history)
+	ratio := float64(tokenCount) / float64(m.maxTokens)
+
+	log.Info().
+		Str("session_id", session.ID()).
+		Int("context_window", m.contextWindow).
+		Int("history_tokens", tokenCount).
+		Int("auto_handoff_limit", m.maxTokens).
+		Float64("token_ratio", ratio).
+		Int("history_messages", len(history)).
+		Bool("over_limit", tokenCount >= m.maxTokens).
+		Msg("tape.auto_handoff.status")
+
+	if tokenCount < m.maxTokens {
 		return cloneMessages(history), nil
 	}
 
@@ -82,6 +107,16 @@ func (m *AutoHandoffContextManager) Prepare(ctx context.Context, messages []*bla
 
 	archive := cloneMessages(history[:splitAt])
 	active := cloneMessages(history[splitAt:])
+
+	log.Info().
+		Str("session_id", session.ID()).
+		Int("context_window", m.contextWindow).
+		Int("history_tokens", tokenCount).
+		Int("auto_handoff_limit", m.maxTokens).
+		Int("history_messages", len(history)).
+		Int("archived_messages", len(archive)).
+		Int("active_messages", len(active)).
+		Msg("tape.auto_handoff.triggered")
 
 	summary, err := m.summarize(ctx, archive)
 	if err != nil {
@@ -104,30 +139,34 @@ func (m *AutoHandoffContextManager) Prepare(ctx context.Context, messages []*bla
 		}
 	}
 
+	log.Info().
+		Str("session_id", session.ID()).
+		Int("context_window", m.contextWindow).
+		Int("history_tokens", tokenCount).
+		Int("auto_handoff_limit", m.maxTokens).
+		Int("active_messages", len(active)).
+		Int("summary_chars", len(summary)).
+		Msg("tape.auto_handoff.completed")
+
 	return active, nil
 }
 
 func (m *AutoHandoffContextManager) summarize(ctx context.Context, history []*blades.Message) (string, error) {
-	summary := ""
-	for start := 0; start < len(history); start += autoHandoffBatchSize {
-		end := min(start+autoHandoffBatchSize, len(history))
-		nextSummary, err := m.extendSummary(ctx, summary, history[start:end])
-		if err != nil {
-			return "", err
-		}
-		summary = strings.TrimSpace(nextSummary)
-	}
-	return summary, nil
+	return m.extendSummary(ctx, history)
 }
 
-func (m *AutoHandoffContextManager) extendSummary(ctx context.Context, existing string, batch []*blades.Message) (string, error) {
-	instruction := autoHandoffInstruction
-	if existing != "" {
-		instruction += "\n\nExisting summary:\n" + existing
+func (m *AutoHandoffContextManager) extendSummary(ctx context.Context, history []*blades.Message) (string, error) {
+	messages := cloneMessages(history)
+	messages = append(messages, blades.UserMessage(buildAutoHandoffPrompt()))
+
+	var instruction *blades.Message
+	if m != nil && m.instruction != nil {
+		instruction = m.instruction.Clone()
 	}
-	resp, err := m.summarizer.Generate(ctx, &blades.ModelRequest{
-		Messages:    batch,
-		Instruction: blades.SystemMessage(instruction),
+
+	resp, err := m.generateSummaryResponse(ctx, &blades.ModelRequest{
+		Messages:    messages,
+		Instruction: instruction,
 	})
 	if err != nil {
 		return "", err
@@ -136,6 +175,40 @@ func (m *AutoHandoffContextManager) extendSummary(ctx context.Context, existing 
 		return "", fmt.Errorf("auto handoff summarizer returned empty response")
 	}
 	return resp.Message.Text(), nil
+}
+
+func (m *AutoHandoffContextManager) generateSummaryResponse(ctx context.Context, req *blades.ModelRequest) (*blades.ModelResponse, error) {
+	if m == nil || m.summarizer == nil {
+		return nil, fmt.Errorf("auto handoff summarizer is required")
+	}
+
+	var (
+		finalResp *blades.ModelResponse
+		streamErr error
+	)
+
+	m.summarizer.NewStreaming(ctx, req)(func(resp *blades.ModelResponse, err error) bool {
+		if err != nil {
+			streamErr = err
+			return false
+		}
+		if resp != nil && resp.Message != nil {
+			finalResp = resp
+		}
+		return true
+	})
+
+	if streamErr != nil {
+		return nil, streamErr
+	}
+	if finalResp == nil || finalResp.Message == nil {
+		return nil, fmt.Errorf("auto handoff summarizer returned no final response")
+	}
+	return finalResp, nil
+}
+
+func buildAutoHandoffPrompt() string {
+	return autoHandoffPromptPrefix
 }
 
 func (m *AutoHandoffContextManager) countTokens(messages []*blades.Message) int {

@@ -100,10 +100,10 @@ Examples:
 - `BUGO_API_KEY`: model provider key, required when `BUGO_MODEL` uses `openai:*`
 - `BUGO_API_BASE`: optional provider base URL
 - `BUGO_MODEL`: required model reference in `provider:model` form, default `openai:gpt-4o-mini`
+- `BUGO_MODEL_CONTEXT_WINDOW`: required model context window in tokens; auto handoff triggers at 90% of this value
 - `BUGO_CODEX_AUTH_FILE`: optional Codex OAuth token file, default `~/.bugo/providers/openai-codex-auth.json`
 - `BUGO_MAX_ITERATIONS`: max agent iterations
 - `BUGO_MAX_OUTPUT_TOKENS`: max model output tokens
-- `BUGO_AUTO_HANDOFF_TOKEN_LIMIT`: prompt-history token threshold that triggers automatic tape handoff
 - `BUGO_TELEGRAM_ALLOW_CHATS`: allowed chat ids
 - `BUGO_TELEGRAM_ALLOW_FROM`: allowed user ids or usernames
 - `BUGO_WORKDIR`: workspace root
