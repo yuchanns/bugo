@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -40,6 +41,8 @@ const (
 	authCallbackAddr   = ":1455"
 	authExpiryBuffer   = 5 * time.Minute
 	authPendingTimeout = 10 * time.Minute
+	codexOriginator    = "codex_cli_rs"
+	codexClientVersion = "1.0.0"
 )
 
 type Config struct {
@@ -873,8 +876,52 @@ func (p *Provider) clearPending() {
 func applyHeaders(header http.Header, current *tokens) {
 	header.Set("Authorization", "Bearer "+current.AccessToken)
 	header.Set("chatgpt-account-id", current.AccountID)
-	header.Set("originator", "codex_cli_rs")
+	header.Set("originator", codexOriginator)
+	header.Set("User-Agent", codexUserAgent())
 	header.Set("OpenAI-Beta", "responses=experimental")
+	stripStainlessHeaders(header)
+}
+
+func stripStainlessHeaders(header http.Header) {
+	for key := range header {
+		if strings.HasPrefix(http.CanonicalHeaderKey(key), "X-Stainless-") {
+			header.Del(key)
+		}
+	}
+}
+
+func codexUserAgent() string {
+	return fmt.Sprintf(
+		"%s/%s (%s; %s)",
+		codexOriginator,
+		codexClientVersion,
+		normalizedCodexOS(),
+		normalizedCodexArch(),
+	)
+}
+
+func normalizedCodexOS() string {
+	switch runtime.GOOS {
+	case "darwin":
+		return "Mac OS"
+	case "linux":
+		return "Linux"
+	case "windows":
+		return "Windows"
+	default:
+		return runtime.GOOS
+	}
+}
+
+func normalizedCodexArch() string {
+	switch runtime.GOARCH {
+	case "amd64":
+		return "x86_64"
+	case "arm64":
+		return "arm64"
+	default:
+		return runtime.GOARCH
+	}
 }
 
 func rewriteCodexPath(u *url.URL) {
