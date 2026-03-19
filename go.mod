@@ -4,7 +4,7 @@ go 1.25.7
 
 require (
 	github.com/go-co-op/gocron/v2 v2.19.1
-	github.com/go-kratos/blades v0.4.0
+	github.com/go-kratos/blades v0.4.1-0.20260317092305-e89dae609ff1
 	github.com/go-kratos/blades/contrib/openai v0.3.0
 	github.com/go-telegram/bot v1.19.0
 	github.com/google/jsonschema-go v0.3.0

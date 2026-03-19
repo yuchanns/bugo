@@ -112,26 +112,26 @@ func resolveExternalSkillsDir(workDir string) (string, error) {
 	return filepath.Clean(filepath.Join(base, ".agents", "skills")), nil
 }
 
-func (a *App) buildAgent() (blades.Agent, error) {
-	model, err := a.buildModelProvider()
+func (a *App) buildAgent() (blades.Agent, blades.ModelProvider, error) {
+	baseModel, err := a.buildModelProvider()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	model = newModel(model, a.inboxes)
+	model := newModel(baseModel, a.inboxes)
 
 	baseTools, err := a.buildTools()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	skillList, err := a.loadSkills()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	tools := baseTools
 	instruction := a.systemInstruction()
 
-	return blades.NewAgent(
+	agent, err := blades.NewAgent(
 		"bugo",
 		blades.WithModel(model),
 		blades.WithInstruction(instruction),
@@ -139,15 +139,16 @@ func (a *App) buildAgent() (blades.Agent, error) {
 		blades.WithSkills(skillList...),
 		blades.WithMiddleware(
 			runtime.AgentRetryMiddleware(),
-			runtime.TapeContextMiddleware(a.tapes, a.cfg.TapeContextLimit),
 			workspaceAgentsPromptMiddleware(a.workDir),
-			runtime.ContextBudgetMiddleware(a.cfg.Model, a.cfg.PromptTokenLimit),
 			runtime.SkillToolLoggingMiddleware(),
 			runtime.PatchToolSchemas(),
-			runtime.WrapToolMiddleware(a.cfg.Model),
 		),
 		blades.WithMaxIterations(a.cfg.ModelMaxIterations),
 	)
+	if err != nil {
+		return nil, nil, err
+	}
+	return agent, baseModel, nil
 }
 
 func (a *App) buildModelProvider() (blades.ModelProvider, error) {
@@ -281,11 +282,20 @@ func (a *App) loadSkills() ([]skills.Skill, error) {
 }
 
 func (a *App) reloadAgent() error {
-	agent, err := a.buildAgent()
+	agent, summaryModel, err := a.buildAgent()
 	if err != nil {
 		return err
 	}
-	runner := blades.NewRunner(agent, blades.WithResumable(true))
+	contextManager, err := runtime.NewAutoHandoffContextManager(runtime.AutoHandoffConfig{
+		Model:      a.cfg.Model,
+		MaxTokens:  a.cfg.AutoHandoffTokenLimit,
+		Summarizer: summaryModel,
+		Tapes:      a.tapes,
+	})
+	if err != nil {
+		return err
+	}
+	runner := blades.NewRunner(agent, blades.WithContextManager(contextManager))
 	a.agentMu.Lock()
 	a.runner = runner
 	a.agentMu.Unlock()
@@ -345,9 +355,6 @@ func (a *App) buildTools() ([]tools.Tool, error) {
 		return nil, err
 	}
 	if err := addFuncTool(&allTools, "tape_search", "Search tape records in current session.", a.handleTapeSearchTool); err != nil {
-		return nil, err
-	}
-	if err := addFuncTool(&allTools, "tape_handoff", "Write a compact handoff summary into tape.", a.handleTapeHandoffTool); err != nil {
 		return nil, err
 	}
 	if err := addFuncTool(&allTools, "write_todos", "Create or replace structured todo list for current task. Use statuses: pending, in_progress, completed.", a.handleWriteTodosTool); err != nil {
@@ -416,9 +423,8 @@ Retrieval policy:
 - After retrieval, keep only the relevant details in working context.
 
 Memory maintenance:
-- Use tape_handoff to store a compact summary after a meaningful milestone, decision, or partial completion.
-- Use tape_handoff before long or multi-step work when a concise checkpoint would help future continuity.
-- Avoid noisy handoffs. Do not create one for every turn.
+- Tape records and anchors may exist from prior runtime checkpoints and operator commands.
+- Use tape tools for retrieval when past context, anchors, or checkpoints are relevant.
 </context_contract>
 `)
 }
@@ -963,29 +969,6 @@ func (a *App) handleTapeSearchTool(ctx context.Context, in tapeSearchInput) (tap
 		return tapeSearchOutput{}, err
 	}
 	return tapeSearchOutput{Records: records}, nil
-}
-
-type tapeHandoffInput struct {
-	Summary string `json:"summary"`
-}
-
-type tapeHandoffOutput struct {
-	Stored bool `json:"stored"`
-}
-
-func (a *App) handleTapeHandoffTool(ctx context.Context, in tapeHandoffInput) (tapeHandoffOutput, error) {
-	sessionID, err := sessionIDFromContext(ctx)
-	if err != nil {
-		return tapeHandoffOutput{}, err
-	}
-	summary := strings.TrimSpace(in.Summary)
-	if summary == "" {
-		return tapeHandoffOutput{}, fmt.Errorf("summary is required")
-	}
-	if err := a.tapes.Append(sessionID, "handoff", map[string]any{"summary": summary}); err != nil {
-		return tapeHandoffOutput{}, err
-	}
-	return tapeHandoffOutput{Stored: true}, nil
 }
 
 func sessionIDFromContext(ctx context.Context) (string, error) {

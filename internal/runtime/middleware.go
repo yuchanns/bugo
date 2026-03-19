@@ -4,11 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net"
 	"net/http"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -19,29 +17,8 @@ import (
 	"github.com/go-kratos/kit/retry"
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/openai/openai-go/v3"
-	"github.com/pkoukk/tiktoken-go"
 	log "github.com/yuchanns/bugo/internal/logging"
-	"github.com/yuchanns/bugo/internal/modelparts"
 )
-
-const (
-	contextBudgetWarnRatio     = 0.80
-	contextBudgetCriticalRatio = 0.90
-)
-
-type contextBudgetKey struct{}
-
-type ContextBudget struct {
-	TokenCount int
-	Limit      int
-	Ratio      float64
-}
-
-type contextBudgetState struct {
-	budget ContextBudget
-	mu     sync.Mutex
-	used   int
-}
 
 func AgentRetryMiddleware() blades.Middleware {
 	return middleware.Retry(
@@ -77,263 +54,6 @@ func isRetryableAgentError(err error) bool {
 		errors.Is(err, syscall.ENETUNREACH)
 }
 
-type promptBudgetEstimator struct {
-	limit   int
-	encoder *tiktoken.Tiktoken
-}
-
-func ContextBudgetMiddleware(model string, limit int) blades.Middleware {
-	estimator := newPromptBudgetEstimator(model, limit)
-	if estimator == nil {
-		return func(next blades.Handler) blades.Handler {
-			return next
-		}
-	}
-	return func(next blades.Handler) blades.Handler {
-		return blades.HandleFunc(func(ctx context.Context, invocation *blades.Invocation) blades.Generator[*blades.Message, error] {
-			if invocation == nil {
-				return next.Handle(ctx, invocation)
-			}
-
-			tokenCount := estimator.approximateInvocationTokens(invocation)
-			ratio := float64(tokenCount) / float64(estimator.limit)
-			logContextBudget(invocation, tokenCount, estimator.limit, ratio)
-			ctx = context.WithValue(ctx, contextBudgetKey{}, &contextBudgetState{
-				budget: ContextBudget{
-					TokenCount: tokenCount,
-					Limit:      estimator.limit,
-					Ratio:      ratio,
-				},
-			})
-
-			note := contextBudgetNote(ratio)
-			if note == "" {
-				return next.Handle(ctx, invocation)
-			}
-
-			cloned := invocation.Clone()
-			budgetMessage := blades.SystemMessage(note)
-			if cloned.Instruction == nil {
-				cloned.Instruction = budgetMessage
-			} else {
-				cloned.Instruction = blades.MergeParts(cloned.Instruction, budgetMessage)
-			}
-			return next.Handle(ctx, cloned)
-		})
-	}
-}
-
-func ContextBudgetFromContext(ctx context.Context) (ContextBudget, bool) {
-	if ctx == nil {
-		return ContextBudget{}, false
-	}
-	state, ok := ctx.Value(contextBudgetKey{}).(*contextBudgetState)
-	if !ok || state == nil {
-		return ContextBudget{}, false
-	}
-	return state.budget, true
-}
-
-func ApproximateTextTokens(model string, text string) (int, error) {
-	encoder, err := tiktoken.EncodingForModel(model)
-	if err != nil {
-		encoder, err = tiktoken.GetEncoding("cl100k_base")
-	}
-	if err != nil {
-		return 0, err
-	}
-	return len(encoder.Encode(text, nil, nil)), nil
-}
-
-func reserveContextBudget(ctx context.Context, tokens int) bool {
-	if ctx == nil || tokens <= 0 {
-		return true
-	}
-	state, ok := ctx.Value(contextBudgetKey{}).(*contextBudgetState)
-	if !ok || state == nil || state.budget.Limit <= 0 {
-		return true
-	}
-	state.mu.Lock()
-	defer state.mu.Unlock()
-	if state.budget.TokenCount+state.used+tokens > state.budget.Limit {
-		return false
-	}
-	state.used += tokens
-	return true
-}
-
-func newPromptBudgetEstimator(model string, limit int) *promptBudgetEstimator {
-	if limit <= 0 {
-		return nil
-	}
-
-	encoder, err := tiktoken.EncodingForModel(model)
-	if err != nil {
-		encoder, err = tiktoken.GetEncoding("cl100k_base")
-	}
-	if err != nil {
-		log.Warn().
-			Str("model", model).
-			Err(err).
-			Msg("context.budget.encoder.unavailable")
-		return nil
-	}
-
-	return &promptBudgetEstimator{
-		limit:   limit,
-		encoder: encoder,
-	}
-}
-
-func (e *promptBudgetEstimator) approximateInvocationTokens(invocation *blades.Invocation) int {
-	if e == nil || e.encoder == nil || invocation == nil {
-		return 0
-	}
-
-	var buf strings.Builder
-	appendMessageToBudgetText(&buf, invocation.Instruction)
-	for _, msg := range invocation.History {
-		appendMessageToBudgetText(&buf, msg)
-	}
-	appendMessageToBudgetText(&buf, invocation.Message)
-
-	return len(e.encoder.Encode(buf.String(), nil, nil))
-}
-
-func appendMessageToBudgetText(buf *strings.Builder, msg *blades.Message) {
-	if buf == nil || msg == nil {
-		return
-	}
-	buf.WriteString("role=")
-	buf.WriteString(string(msg.Role))
-	buf.WriteByte('\n')
-	for _, part := range msg.Parts {
-		switch v := part.(type) {
-		case modelparts.ReasoningPart:
-			continue
-		case blades.TextPart:
-			buf.WriteString(v.Text)
-		case blades.FilePart:
-			buf.WriteString(v.Name)
-			buf.WriteByte(' ')
-			buf.WriteString(string(v.MIMEType))
-			buf.WriteByte(' ')
-			buf.WriteString(v.URI)
-		case blades.DataPart:
-			buf.WriteString(v.Name)
-			buf.WriteByte(' ')
-			buf.WriteString(string(v.MIMEType))
-			buf.WriteString(" bytes=")
-			buf.WriteString(fmt.Sprintf("%d", len(v.Bytes)))
-		case blades.ToolPart:
-			buf.WriteString("tool ")
-			buf.WriteString(v.Name)
-			buf.WriteString(" request ")
-			buf.WriteString(v.Request)
-			buf.WriteString(" response ")
-			buf.WriteString(v.Response)
-		}
-		buf.WriteByte('\n')
-	}
-}
-
-func logContextBudget(invocation *blades.Invocation, tokenCount int, limit int, ratio float64) {
-	if limit <= 0 || invocation == nil || ratio < contextBudgetWarnRatio {
-		return
-	}
-
-	event := log.Info()
-	if ratio >= contextBudgetCriticalRatio {
-		event = log.Warn()
-	}
-
-	sessionID := ""
-	if invocation.Session != nil {
-		sessionID = invocation.Session.ID()
-	}
-
-	event.
-		Str("session_id", sessionID).
-		Int("prompt_tokens", tokenCount).
-		Int("prompt_limit", limit).
-		Float64("prompt_ratio", ratio).
-		Msg("context.budget")
-}
-
-func contextBudgetNote(ratio float64) string {
-	switch {
-	case ratio >= contextBudgetCriticalRatio:
-		return strings.TrimSpace(`
-<context_budget>
-Context budget is very tight.
-Avoid unnecessary retrieval and use tape_handoff proactively before continuing long or multi-step work.
-Keep working context compact.
-</context_budget>
-`)
-	case ratio >= contextBudgetWarnRatio:
-		return strings.TrimSpace(`
-<context_budget>
-Context budget is getting tight.
-Prefer concise reasoning, avoid unnecessary retrieval, and use tape_handoff before long or multi-step work when a compact checkpoint would help.
-</context_budget>
-`)
-	default:
-		return ""
-	}
-}
-
-func TapeContextMiddleware(tapes *TapeStore, limit int) blades.Middleware {
-	return func(next blades.Handler) blades.Handler {
-		return blades.HandleFunc(func(ctx context.Context, invocation *blades.Invocation) blades.Generator[*blades.Message, error] {
-			if invocation == nil || invocation.Session == nil || tapes == nil {
-				return next.Handle(ctx, invocation)
-			}
-			sessionID := invocation.Session.ID()
-			if err := tapes.EnsureBootstrapAnchor(sessionID); err != nil {
-				log.Error().
-					Str("session_id", sessionID).
-					Err(err).
-					Msg("tape.bootstrap.ensure.failed")
-				return next.Handle(ctx, invocation)
-			}
-			history, err := tapes.HistoryMessages(sessionID)
-			if err != nil {
-				if !errors.Is(err, ErrTapeAnchorNotFound) {
-					log.Error().
-						Str("session_id", sessionID).
-						Err(err).
-						Msg("tape.context.load.failed")
-				}
-				return next.Handle(ctx, invocation)
-			}
-			if invocation.Message != nil {
-				filtered := make([]*blades.Message, 0, len(history))
-				for _, m := range history {
-					if m == nil || m.ID == invocation.Message.ID {
-						continue
-					}
-					filtered = append(filtered, m)
-				}
-				history = filtered
-			}
-			history = tailMessages(history, limit)
-			if len(history) == 0 {
-				return next.Handle(ctx, invocation)
-			}
-			cloned := invocation.Clone()
-			cloned.History = history
-			return next.Handle(ctx, cloned)
-		})
-	}
-}
-
-func tailMessages(history []*blades.Message, limit int) []*blades.Message {
-	if limit <= 0 || len(history) <= limit {
-		return history
-	}
-	return history[len(history)-limit:]
-}
-
 func SkillToolLoggingMiddleware() blades.Middleware {
 	return func(next blades.Handler) blades.Handler {
 		return blades.HandleFunc(func(ctx context.Context, invocation *blades.Invocation) blades.Generator[*blades.Message, error] {
@@ -353,30 +73,6 @@ func SkillToolLoggingMiddleware() blades.Middleware {
 				invocation.Tools[i] = &skillLoggedTool{Tool: tool}
 			}
 			return next.Handle(ctx, invocation)
-		})
-	}
-}
-
-func WrapToolMiddleware(model string) blades.Middleware {
-	return func(next blades.Handler) blades.Handler {
-		return blades.HandleFunc(func(ctx context.Context, invocation *blades.Invocation) blades.Generator[*blades.Message, error] {
-			if invocation == nil || len(invocation.Tools) == 0 {
-				return next.Handle(ctx, invocation)
-			}
-			cloned := invocation.Clone()
-			for i, tool := range cloned.Tools {
-				if tool == nil {
-					continue
-				}
-				if _, ok := tool.(*wrappedTool); ok {
-					continue
-				}
-				cloned.Tools[i] = &wrappedTool{
-					Tool:  tool,
-					model: model,
-				}
-			}
-			return next.Handle(ctx, cloned)
 		})
 	}
 }
@@ -412,44 +108,6 @@ func (t *skillLoggedTool) Handle(ctx context.Context, input string) (string, err
 	}
 	logSkillToolSuccess(ctx, t.Name(), input, output, elapsed)
 	return output, nil
-}
-
-type wrappedTool struct {
-	tools.Tool
-	model string
-}
-
-func (t *wrappedTool) Handle(ctx context.Context, input string) (string, error) {
-	output, err := t.Tool.Handle(ctx, input)
-	if err != nil || strings.TrimSpace(output) == "" {
-		return output, err
-	}
-	budget, ok := ContextBudgetFromContext(ctx)
-	if !ok || budget.Limit <= 0 {
-		return output, nil
-	}
-	outputTokens, err := ApproximateTextTokens(t.model, output)
-	if err != nil {
-		return output, nil
-	}
-	if reserveContextBudget(ctx, outputTokens) {
-		return output, nil
-	}
-	log.Warn().
-		Str("tool_name", t.Name()).
-		Int("output_tokens", outputTokens).
-		Int("prompt_tokens", budget.TokenCount).
-		Int("prompt_limit", budget.Limit).
-		Msg("tool.output.context_limited")
-	payload, err := json.Marshal(map[string]any{
-		"warning":    "Tool output was omitted because it would exceed the current context limit. Change tool usage strategy, narrow the request, or reduce the amount of returned data.",
-		"error_code": "CONTEXT_LIMIT_EXCEEDED",
-		"tool_name":  t.Name(),
-	})
-	if err != nil {
-		return `{"warning":"Tool output was omitted because it would exceed the current context limit.","error_code":"CONTEXT_LIMIT_EXCEEDED"}`, nil
-	}
-	return string(payload), nil
 }
 
 func logSkillToolStart(ctx context.Context, name string, input string) {

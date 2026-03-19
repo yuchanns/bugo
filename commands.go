@@ -13,6 +13,7 @@ import (
 	"unicode"
 
 	log "github.com/yuchanns/bugo/internal/logging"
+	runtimepkg "github.com/yuchanns/bugo/internal/runtime"
 )
 
 type commandSpec struct {
@@ -44,7 +45,7 @@ var builtinCommandSpecs = map[string]commandSpec{
 	"codex.login.complete": {Name: "codex.login.complete", Description: "Complete OpenAI Codex OAuth login with callback URL or code", Usage: ",codex.login.complete url='http://localhost:1455/auth/callback?code=...&state=...'"},
 	"codex.status":         {Name: "codex.status", Description: "Show OpenAI Codex auth status", Usage: ",codex.status"},
 	"codex.logout":         {Name: "codex.logout", Description: "Clear OpenAI Codex auth state", Usage: ",codex.logout"},
-	"tape.handoff":         {Name: "tape.handoff", Description: "Create anchor handoff", Usage: ",tape.handoff name=phase-1 summary='Bootstrap complete'"},
+	"tape.handoff":         {Name: "tape.handoff", Description: "Create handoff anchor", Usage: ",tape.handoff name=phase-1 summary='Bootstrap complete'"},
 	"tape.anchors":         {Name: "tape.anchors", Description: "List tape anchors", Usage: ",tape.anchors"},
 	"tape.info":            {Name: "tape.info", Description: "Show tape summary", Usage: ",tape.info"},
 	"tape.search":          {Name: "tape.search", Description: "Search tape entries", Usage: ",tape.search query=error"},
@@ -276,14 +277,11 @@ func (a *App) execTapeHandoff(inbox *sessionInbox, parsed parsedCommandArgs) (st
 	}
 	nextSteps := strings.TrimSpace(parsed.Kwargs["next_steps"])
 
-	payload := map[string]any{"name": name}
-	if summary != "" {
-		payload["summary"] = summary
-	}
-	if nextSteps != "" {
-		payload["next_steps"] = nextSteps
-	}
-	if err := a.tapes.Append(inbox.session.ID(), "anchor", payload); err != nil {
+	if err := a.tapes.AppendHandoff(inbox.session.ID(), runtimepkg.HandoffPayload{
+		Name:      name,
+		Summary:   summary,
+		NextSteps: nextSteps,
+	}); err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("handoff created: %s", name), nil

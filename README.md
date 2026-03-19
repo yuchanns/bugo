@@ -103,8 +103,7 @@ Examples:
 - `BUGO_CODEX_AUTH_FILE`: optional Codex OAuth token file, default `~/.bugo/providers/openai-codex-auth.json`
 - `BUGO_MAX_ITERATIONS`: max agent iterations
 - `BUGO_MAX_OUTPUT_TOKENS`: max model output tokens
-- `BUGO_PROMPT_TOKEN_LIMIT`: optional soft prompt budget for context-pressure hints
-- `BUGO_TAPE_CONTEXT_LIMIT`: number of recent tape messages injected into prompt context, default `10`; set `0` to disable truncation
+- `BUGO_AUTO_HANDOFF_TOKEN_LIMIT`: prompt-history token threshold that triggers automatic tape handoff
 - `BUGO_TELEGRAM_ALLOW_CHATS`: allowed chat ids
 - `BUGO_TELEGRAM_ALLOW_FROM`: allowed user ids or usernames
 - `BUGO_WORKDIR`: workspace root

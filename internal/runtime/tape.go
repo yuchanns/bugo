@@ -42,6 +42,12 @@ type TapeStore struct {
 	mu   sync.RWMutex
 }
 
+type HandoffPayload struct {
+	Name      string
+	Summary   string
+	NextSteps string
+}
+
 var ErrTapeAnchorNotFound = errors.New("tape anchor not found")
 
 func NewTapeStore(root, _ string) (*TapeStore, error) {
@@ -68,6 +74,29 @@ func (s *TapeStore) Append(sessionID, kind string, payload map[string]any) error
 		return err
 	}
 	return nil
+}
+
+func (s *TapeStore) AppendHandoff(sessionID string, payload HandoffPayload) error {
+	name := strings.TrimSpace(payload.Name)
+	if name == "" {
+		name = "handoff"
+	}
+
+	record := map[string]any{
+		"name": name,
+	}
+	state := map[string]any{}
+	if summary := strings.TrimSpace(payload.Summary); summary != "" {
+		state["summary"] = summary
+	}
+	if nextSteps := strings.TrimSpace(payload.NextSteps); nextSteps != "" {
+		state["next_steps"] = nextSteps
+	}
+	if len(state) > 0 {
+		record["state"] = state
+	}
+
+	return s.Append(sessionID, "anchor", record)
 }
 
 func (s *TapeStore) AppendMessage(sessionID string, message *blades.Message) error {
@@ -562,7 +591,7 @@ func selectTapeMessages(records []TapeRecord) []*blades.Message {
 }
 
 func isAnchorRecord(rec TapeRecord) bool {
-	return rec.Kind == "anchor" || rec.Kind == "handoff"
+	return rec.Kind == "anchor"
 }
 
 func decodeToolCalls(value any) []blades.ToolPart {

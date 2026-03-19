@@ -15,25 +15,24 @@ const (
 )
 
 type Config struct {
-	TelegramToken      string
-	TelegramProxy      string
-	TelegramWorkers    int
-	AllowChats         map[int64]struct{}
-	AllowFrom          map[string]struct{}
-	DebounceSeconds    int
-	MessageDelay       int
-	ActiveWindow       int
-	Provider           string
-	Model              string
-	ModelMaxIterations int
-	MaxOutputTokens    int
-	PromptTokenLimit   int
-	TapeContextLimit   int
-	APIKey             string
-	APIBase            string
-	CodexAuthFile      string
-	WorkDir            string
-	HomeDir            string
+	TelegramToken         string
+	TelegramProxy         string
+	TelegramWorkers       int
+	AllowChats            map[int64]struct{}
+	AllowFrom             map[string]struct{}
+	DebounceSeconds       int
+	MessageDelay          int
+	ActiveWindow          int
+	Provider              string
+	Model                 string
+	ModelMaxIterations    int
+	MaxOutputTokens       int
+	AutoHandoffTokenLimit int
+	APIKey                string
+	APIBase               string
+	CodexAuthFile         string
+	WorkDir               string
+	HomeDir               string
 }
 
 func LoadConfig() (Config, error) {
@@ -44,20 +43,19 @@ func LoadConfig() (Config, error) {
 	}
 
 	cfg := Config{
-		TelegramToken:      env("BUGO_TELEGRAM_TOKEN"),
-		TelegramProxy:      env("BUGO_TELEGRAM_PROXY"),
-		TelegramWorkers:    intEnv("BUGO_TELEGRAM_WORKERS", 4),
-		DebounceSeconds:    intEnv("BUGO_DEBOUNCE_SECONDS", 1),
-		MessageDelay:       intEnv("BUGO_MESSAGE_DELAY_SECONDS", 10),
-		ActiveWindow:       intEnv("BUGO_ACTIVE_WINDOW_SECONDS", 60),
-		Provider:           provider,
-		Model:              model,
-		ModelMaxIterations: intEnv("BUGO_MAX_ITERATIONS", defaultMaxIterations),
-		MaxOutputTokens:    intEnv("BUGO_MAX_OUTPUT_TOKENS", 1024),
-		PromptTokenLimit:   intEnv("BUGO_PROMPT_TOKEN_LIMIT", 0),
-		TapeContextLimit:   intEnv("BUGO_TAPE_CONTEXT_LIMIT", 10),
-		WorkDir:            env("BUGO_WORKDIR"),
-		HomeDir:            resolveHomeDir(firstNonEmpty(env("BUGO_HOME"), "~/.bugo")),
+		TelegramToken:         env("BUGO_TELEGRAM_TOKEN"),
+		TelegramProxy:         env("BUGO_TELEGRAM_PROXY"),
+		TelegramWorkers:       intEnv("BUGO_TELEGRAM_WORKERS", 4),
+		DebounceSeconds:       intEnv("BUGO_DEBOUNCE_SECONDS", 1),
+		MessageDelay:          intEnv("BUGO_MESSAGE_DELAY_SECONDS", 10),
+		ActiveWindow:          intEnv("BUGO_ACTIVE_WINDOW_SECONDS", 60),
+		Provider:              provider,
+		Model:                 model,
+		ModelMaxIterations:    intEnv("BUGO_MAX_ITERATIONS", defaultMaxIterations),
+		MaxOutputTokens:       intEnv("BUGO_MAX_OUTPUT_TOKENS", 1024),
+		AutoHandoffTokenLimit: intEnv("BUGO_AUTO_HANDOFF_TOKEN_LIMIT", 128000),
+		WorkDir:               env("BUGO_WORKDIR"),
+		HomeDir:               resolveHomeDir(firstNonEmpty(env("BUGO_HOME"), "~/.bugo")),
 	}
 	cfg.APIKey = env("BUGO_API_KEY")
 	cfg.APIBase = env("BUGO_API_BASE")
@@ -74,6 +72,9 @@ func LoadConfig() (Config, error) {
 	}
 	if cfg.Provider != "openai" && cfg.Provider != "codex" {
 		return Config{}, fmt.Errorf("unsupported provider %q", cfg.Provider)
+	}
+	if cfg.AutoHandoffTokenLimit <= 0 {
+		return Config{}, fmt.Errorf("missing auto handoff token limit, set BUGO_AUTO_HANDOFF_TOKEN_LIMIT to a positive integer")
 	}
 
 	allowChats, err := parseInt64Set(env("BUGO_TELEGRAM_ALLOW_CHATS"))
