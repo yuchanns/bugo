@@ -29,18 +29,23 @@ import (
 )
 
 type App struct {
-	cfg      Config
-	tapes    *runtime.TapeStore
-	sessions *SessionStore
-	inboxes  *inboxHub
-	runner   *blades.Runner
-	bot      *bot.Bot
-	botUser  *models.User
-	skills   []skills.Skill
-	schedule *ScheduleStore
-	workDir  string
-	codex    *codexauth.Provider
-	agentMu  sync.RWMutex
+	cfg               Config
+	tapes             *runtime.TapeStore
+	sessions          *SessionStore
+	inboxes           *inboxHub
+	runner            *blades.Runner
+	bot               *bot.Bot
+	botUser           *models.User
+	skills            []skills.Skill
+	schedule          *ScheduleStore
+	workDir           string
+	codex             *codexauth.Provider
+	sessionChainState sessionChainResetter
+	agentMu           sync.RWMutex
+}
+
+type sessionChainResetter interface {
+	ResetSessionChain(sessionID string)
 }
 
 func NewApp(cfg Config) (*App, error) {
@@ -155,6 +160,7 @@ func (a *App) buildModelProvider() (blades.ModelProvider, error) {
 	switch a.cfg.Provider {
 	case "openai":
 		a.codex = nil
+		a.sessionChainState = nil
 		modelConfig := openai.Config{
 			BaseURL:         a.cfg.APIBase,
 			APIKey:          a.cfg.APIKey,
@@ -166,6 +172,7 @@ func (a *App) buildModelProvider() (blades.ModelProvider, error) {
 		return openai.NewModel(a.cfg.Model, modelConfig), nil
 	case "codex":
 		if a.codex != nil && a.codex.Name() == a.cfg.Model {
+			a.sessionChainState = a.codex
 			return a.codex, nil
 		}
 		provider, err := codexauth.New(codexauth.Config{
@@ -178,6 +185,7 @@ func (a *App) buildModelProvider() (blades.ModelProvider, error) {
 			return nil, err
 		}
 		a.codex = provider
+		a.sessionChainState = provider
 		return provider, nil
 	default:
 		return nil, fmt.Errorf("unsupported provider %q", a.cfg.Provider)
@@ -206,6 +214,9 @@ func (t *openAIStatusLoggingTransport) RoundTrip(req *http.Request) (*http.Respo
 		return nil, err
 	}
 	if resp == nil || resp.Body == nil {
+		return resp, nil
+	}
+	if resp.StatusCode == http.StatusSwitchingProtocols || isWebsocketUpgradeRequest(req) {
 		return resp, nil
 	}
 	resp.Body = &openAIResponseBodyLogger{
@@ -241,6 +252,13 @@ func (r *openAIResponseBodyLogger) Read(p []byte) (int, error) {
 
 func (r *openAIResponseBodyLogger) Close() error {
 	return r.body.Close()
+}
+
+func isWebsocketUpgradeRequest(req *http.Request) bool {
+	if req == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(req.Header.Get("Upgrade")), "websocket")
 }
 
 func (a *App) loadSkills() ([]skills.Skill, error) {
@@ -292,6 +310,7 @@ func (a *App) reloadAgent() error {
 		Instruction:   a.systemInstruction(),
 		Summarizer:    summaryModel,
 		Tapes:         a.tapes,
+		OnCheckpoint:  a.invalidateSessionModelState,
 	})
 	if err != nil {
 		return err
@@ -318,6 +337,13 @@ func (a *App) currentSkills() []skills.Skill {
 	out := make([]skills.Skill, len(a.skills))
 	copy(out, a.skills)
 	return out
+}
+
+func (a *App) invalidateSessionModelState(sessionID string) {
+	if a == nil || a.sessionChainState == nil {
+		return
+	}
+	a.sessionChainState.ResetSessionChain(sessionID)
 }
 
 func mergeSkills(base []skills.Skill, extra []skills.Skill) []skills.Skill {

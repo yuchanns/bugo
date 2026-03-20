@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,14 +20,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/go-kratos/blades"
 	bladestools "github.com/go-kratos/blades/tools"
-	openai "github.com/openai/openai-go/v3"
-	"github.com/openai/openai-go/v3/option"
 	"github.com/openai/openai-go/v3/packages/param"
 	"github.com/openai/openai-go/v3/responses"
 	"github.com/openai/openai-go/v3/shared"
 	log "github.com/yuchanns/bugo/internal/logging"
+	"github.com/yuchanns/bugo/internal/modelctx"
 	"github.com/yuchanns/bugo/internal/modelparts"
 )
 
@@ -57,7 +58,6 @@ type Provider struct {
 	authFile        string
 	maxOutputTokens int64
 	httpClient      *http.Client
-	client          openai.Client
 
 	mu      sync.RWMutex
 	tokens  *tokens
@@ -66,6 +66,12 @@ type Provider struct {
 	refreshMu  sync.Mutex
 	serverOnce sync.Once
 	serverErr  error
+
+	chainMu sync.Mutex
+	chains  map[string]responseChainState
+
+	wsMu       sync.Mutex
+	wsSessions map[string]*websocketSession
 }
 
 type tokens struct {
@@ -89,9 +95,30 @@ type tokenResponse struct {
 	ExpiresIn    int64  `json:"expires_in"`
 }
 
-type codexTransport struct {
-	base     http.RoundTripper
-	provider *Provider
+type websocketSession struct {
+	mu        sync.Mutex
+	conn      *websocket.Conn
+	turnState string
+}
+
+type responseChainState struct {
+	ResponseID         string
+	RequestFingerprint string
+	MessageCount       int
+	MessagePrefixHash  string
+}
+
+type responseRequestPlan struct {
+	Params                responses.ResponseNewParams
+	SessionID             string
+	RequestFingerprint    string
+	MessageCount          int
+	MessagePrefixHash     string
+	PreviousResponseReady bool
+	UsedPreviousResponse  bool
+	ResponseChainDisabled bool
+	DecisionReason        string
+	DeltaMessageCount     int
 }
 
 func New(cfg Config) (*Provider, error) {
@@ -112,16 +139,12 @@ func New(cfg Config) (*Provider, error) {
 		authFile:        strings.TrimSpace(cfg.AuthFile),
 		maxOutputTokens: cfg.MaxOutputTokens,
 		httpClient:      client,
+		chains:          map[string]responseChainState{},
+		wsSessions:      map[string]*websocketSession{},
 	}
 	if err := p.loadTokens(); err != nil {
 		return nil, err
 	}
-
-	p.client = openai.NewClient(
-		option.WithBaseURL(backendBaseURL),
-		option.WithAPIKey("codex-auth-placeholder"),
-		option.WithHTTPClient(p.newResponsesHTTPClient()),
-	)
 	return p, nil
 }
 
@@ -130,73 +153,57 @@ func (p *Provider) Name() string {
 }
 
 func (p *Provider) Generate(ctx context.Context, req *blades.ModelRequest) (*blades.ModelResponse, error) {
-	params, err := p.toResponsesParams(ctx, req)
-	if err != nil {
-		return nil, err
+	var final *blades.ModelResponse
+	var streamErr error
+	p.NewStreaming(ctx, req)(func(resp *blades.ModelResponse, err error) bool {
+		if err != nil {
+			streamErr = err
+			return false
+		}
+		if resp != nil && resp.Message != nil && resp.Message.Status == blades.StatusCompleted {
+			final = resp
+		}
+		return true
+	})
+	if streamErr != nil {
+		return nil, streamErr
 	}
-	response, err := p.client.Responses.New(ctx, params)
-	if err != nil {
-		return nil, err
+	if final == nil {
+		return nil, blades.ErrNoFinalResponse
 	}
-	return responseToModelResponse(response), nil
+	return final, nil
 }
 
 func (p *Provider) NewStreaming(ctx context.Context, req *blades.ModelRequest) blades.Generator[*blades.ModelResponse, error] {
 	return func(yield func(*blades.ModelResponse, error) bool) {
-		params, err := p.toResponsesParams(ctx, req)
+		plan, err := p.buildResponseRequestPlan(ctx, req)
 		if err != nil {
 			yield(nil, err)
 			return
 		}
 
-		streaming := p.client.Responses.NewStreaming(ctx, params)
-		defer streaming.Close()
-
-		for streaming.Next() {
-			switch ev := streaming.Current().AsAny().(type) {
-			case responses.ResponseTextDeltaEvent:
-				if ev.Delta == "" {
-					continue
-				}
-				if !yield(incompleteTextResponse(ev.Delta), nil) {
-					return
-				}
-			case responses.ResponseReasoningSummaryTextDeltaEvent:
-				if ev.Delta == "" {
-					continue
-				}
-				if !yield(incompleteReasoningResponse(ev.Delta), nil) {
-					return
-				}
-			case responses.ResponseReasoningTextDeltaEvent:
-				if ev.Delta == "" {
-					continue
-				}
-				if !yield(incompleteReasoningResponse(ev.Delta), nil) {
-					return
-				}
-			case responses.ResponseCompletedEvent:
-				if !yield(responseToModelResponse(&ev.Response), nil) {
-					return
-				}
-				return
-			case responses.ResponseFailedEvent:
-				yield(nil, fmt.Errorf("codex response failed: %s", ev.Response.Error.Message))
-				return
-			case responses.ResponseIncompleteEvent:
-				yield(nil, fmt.Errorf("codex response incomplete: %s", ev.Response.IncompleteDetails.Reason))
-				return
-			case responses.ResponseErrorEvent:
-				yield(nil, fmt.Errorf("codex response error: %s", ev.Message))
-				return
-			}
-		}
-		if err := streaming.Err(); err != nil {
+		if err := p.streamWebsocketResponse(ctx, plan, yield); err != nil {
+			p.clearResponseChainOnError(plan)
 			yield(nil, err)
-			return
 		}
-		yield(nil, blades.ErrNoFinalResponse)
 	}
+}
+
+func (p *Provider) ResetSessionChain(sessionID string) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return
+	}
+	p.dropWebsocketSession(sessionID, "chain_reset")
+	p.chainMu.Lock()
+	if p.chains == nil {
+		p.chains = map[string]responseChainState{}
+	}
+	delete(p.chains, sessionID)
+	p.chainMu.Unlock()
+	log.Info().
+		Str("session_id", sessionID).
+		Msg("codex.response_chain.reset")
 }
 
 func (p *Provider) StartLogin() (string, error) {
@@ -295,6 +302,9 @@ func (p *Provider) Logout() error {
 	p.tokens = nil
 	p.pending = nil
 	p.mu.Unlock()
+	p.chainMu.Lock()
+	p.chains = map[string]responseChainState{}
+	p.chainMu.Unlock()
 	if err := os.Remove(p.authFile); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
@@ -323,50 +333,43 @@ func (p *Provider) FetchModels(ctx context.Context) ([]byte, error) {
 	return io.ReadAll(resp.Body)
 }
 
-func (p *Provider) newResponsesHTTPClient() *http.Client {
-	cloned := *p.httpClient
-	baseTransport := cloned.Transport
-	if baseTransport == nil {
-		baseTransport = http.DefaultTransport
-	}
-	cloned.Transport = &codexTransport{
-		base:     baseTransport,
-		provider: p,
-	}
-	return &cloned
-}
-
-func (t *codexTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+func (p *Provider) buildResponseRequestPlan(ctx context.Context, req *blades.ModelRequest) (responseRequestPlan, error) {
 	if req == nil {
-		return nil, fmt.Errorf("nil request")
-	}
-
-	cloned := req.Clone(req.Context())
-	cloned.URL = cloneURL(req.URL)
-	cloned.Header = req.Header.Clone()
-	rewriteCodexPath(cloned.URL)
-
-	current, err := t.provider.getValidTokens(cloned.Context())
-	if err != nil {
-		return nil, err
-	}
-	applyHeaders(cloned.Header, current)
-	return t.base.RoundTrip(cloned)
-}
-
-func (p *Provider) toResponsesParams(ctx context.Context, req *blades.ModelRequest) (responses.ResponseNewParams, error) {
-	if req == nil {
-		return responses.ResponseNewParams{}, fmt.Errorf("model request is required")
+		return responseRequestPlan{}, fmt.Errorf("model request is required")
 	}
 
 	baseModel, reasoningEffort := normalizeModelName(p.model)
-	input, err := toInputItems(req.Messages)
+	requestFingerprint, err := buildRequestFingerprint(baseModel, reasoningEffort, req)
 	if err != nil {
-		return responses.ResponseNewParams{}, err
+		return responseRequestPlan{}, err
+	}
+	messagePrefixHash, err := hashMessages(req.Messages)
+	if err != nil {
+		return responseRequestPlan{}, err
 	}
 	tools, err := toTools(req.Tools)
 	if err != nil {
-		return responses.ResponseNewParams{}, err
+		return responseRequestPlan{}, err
+	}
+	inputMessages := req.Messages
+	sessionID := promptCacheKeyFromContext(ctx)
+	responseChainDisabled := modelctx.ResponseChainDisabled(ctx)
+	previousResponseReady := false
+	usedPreviousResponse := false
+	var previousResponseID string
+	decisionReason := "no_session"
+	if sessionID != "" && !responseChainDisabled {
+		inputMessages, previousResponseID, usedPreviousResponse, decisionReason, err = p.resolveIncrementalMessages(sessionID, req, requestFingerprint)
+		if err != nil {
+			return responseRequestPlan{}, err
+		}
+		previousResponseReady = usedPreviousResponse
+	} else if sessionID != "" && responseChainDisabled {
+		decisionReason = "chain_disabled"
+	}
+	input, err := toInputItems(inputMessages)
+	if err != nil {
+		return responseRequestPlan{}, err
 	}
 	params := responses.ResponseNewParams{
 		Model: shared.ResponsesModel(baseModel),
@@ -398,14 +401,40 @@ func (p *Provider) toResponsesParams(ctx context.Context, req *blades.ModelReque
 	if req.OutputSchema != nil {
 		format, err := buildResponseFormat(req.OutputSchema)
 		if err != nil {
-			return responses.ResponseNewParams{}, err
+			return responseRequestPlan{}, err
 		}
 		params.Text.Format = format
 	}
-	if promptCacheKey := promptCacheKeyFromContext(ctx); promptCacheKey != "" {
-		params.PromptCacheKey = param.NewOpt(promptCacheKey)
+	if sessionID != "" {
+		params.PromptCacheKey = param.NewOpt(sessionID)
 	}
-	return params, nil
+	if previousResponseID != "" {
+		params.PreviousResponseID = param.NewOpt(previousResponseID)
+	}
+	plan := responseRequestPlan{
+		Params:                params,
+		SessionID:             sessionID,
+		RequestFingerprint:    requestFingerprint,
+		MessageCount:          len(req.Messages),
+		MessagePrefixHash:     messagePrefixHash,
+		PreviousResponseReady: previousResponseReady,
+		UsedPreviousResponse:  usedPreviousResponse,
+		ResponseChainDisabled: responseChainDisabled,
+		DecisionReason:        decisionReason,
+		DeltaMessageCount:     len(inputMessages),
+	}
+	log.Info().
+		Str("session_id", sessionID).
+		Str("prompt_cache_key", sessionID).
+		Bool("prompt_cache_key_enabled", sessionID != "").
+		Bool("previous_response_id_ready", previousResponseReady).
+		Bool("previous_response_id_enabled", usedPreviousResponse).
+		Str("previous_response_id", previousResponseID).
+		Int("history_messages", len(req.Messages)).
+		Int("request_messages", len(inputMessages)).
+		Str("decision_reason", decisionReason).
+		Msg("codex.request.plan")
+	return plan, nil
 }
 
 func promptCacheKeyFromContext(ctx context.Context) string {
@@ -417,6 +446,398 @@ func promptCacheKeyFromContext(ctx context.Context) string {
 		return ""
 	}
 	return strings.TrimSpace(session.ID())
+}
+
+func (p *Provider) resolveIncrementalMessages(sessionID string, req *blades.ModelRequest, requestFingerprint string) ([]*blades.Message, string, bool, string, error) {
+	chain, ok := p.loadResponseChain(sessionID)
+	if !ok || chain.ResponseID == "" {
+		return req.Messages, "", false, "chain_missing", nil
+	}
+	if !p.hasActiveWebsocketSession(sessionID) {
+		return req.Messages, "", false, "websocket_session_missing", nil
+	}
+	if chain.RequestFingerprint != requestFingerprint {
+		return req.Messages, "", false, "fingerprint_mismatch", nil
+	}
+	if chain.MessageCount <= 0 || chain.MessageCount >= len(req.Messages) {
+		return req.Messages, "", false, "message_count_not_advanced", nil
+	}
+	prefixHash, err := hashMessages(req.Messages[:chain.MessageCount])
+	if err != nil {
+		return nil, "", false, "", err
+	}
+	if prefixHash != chain.MessagePrefixHash {
+		return req.Messages, "", false, "prefix_hash_mismatch", nil
+	}
+	return cloneMessages(req.Messages[chain.MessageCount:]), chain.ResponseID, true, "incremental", nil
+}
+
+func (p *Provider) loadResponseChain(sessionID string) (responseChainState, bool) {
+	p.chainMu.Lock()
+	defer p.chainMu.Unlock()
+	if p.chains == nil {
+		p.chains = map[string]responseChainState{}
+	}
+	chain, ok := p.chains[sessionID]
+	return chain, ok
+}
+
+func (p *Provider) rememberResponseChain(plan responseRequestPlan, responseID string) {
+	if p == nil || plan.SessionID == "" || responseID == "" || plan.ResponseChainDisabled {
+		return
+	}
+	state := responseChainState{
+		ResponseID:         strings.TrimSpace(responseID),
+		RequestFingerprint: plan.RequestFingerprint,
+		MessageCount:       plan.MessageCount,
+		MessagePrefixHash:  plan.MessagePrefixHash,
+	}
+	p.chainMu.Lock()
+	if p.chains == nil {
+		p.chains = map[string]responseChainState{}
+	}
+	p.chains[plan.SessionID] = state
+	p.chainMu.Unlock()
+	log.Info().
+		Str("session_id", plan.SessionID).
+		Str("response_id", state.ResponseID).
+		Int("message_count", state.MessageCount).
+		Msg("codex.response_chain.save")
+}
+
+func (p *Provider) clearResponseChainOnError(plan responseRequestPlan) {
+	if !plan.UsedPreviousResponse || plan.SessionID == "" {
+		return
+	}
+	p.ResetSessionChain(plan.SessionID)
+}
+
+func (p *Provider) hasActiveWebsocketSession(sessionID string) bool {
+	if p == nil || strings.TrimSpace(sessionID) == "" {
+		return false
+	}
+	p.wsMu.Lock()
+	defer p.wsMu.Unlock()
+	return p.wsSessions[sessionID] != nil
+}
+
+func (p *Provider) ensureWebsocketSession(ctx context.Context, sessionID string) (*websocketSession, bool, error) {
+	if strings.TrimSpace(sessionID) == "" {
+		return nil, false, fmt.Errorf("codex websocket requires a session id")
+	}
+	p.wsMu.Lock()
+	if p.wsSessions == nil {
+		p.wsSessions = map[string]*websocketSession{}
+	}
+	session := p.wsSessions[sessionID]
+	if session == nil {
+		session = &websocketSession{}
+		p.wsSessions[sessionID] = session
+	}
+	p.wsMu.Unlock()
+	reused, err := p.connectWebsocketSession(ctx, sessionID, session)
+	if err != nil {
+		p.removeWebsocketSession(sessionID, session)
+	}
+	return session, reused, err
+}
+
+func (p *Provider) connectWebsocketSession(ctx context.Context, sessionID string, session *websocketSession) (bool, error) {
+	if session == nil {
+		return false, fmt.Errorf("nil websocket session")
+	}
+
+	session.mu.Lock()
+	defer session.mu.Unlock()
+	if session.conn != nil {
+		return true, nil
+	}
+
+	current, err := p.getValidTokens(ctx)
+	if err != nil {
+		return false, err
+	}
+	wsURL, err := responsesWebsocketURL()
+	if err != nil {
+		return false, err
+	}
+	headers := http.Header{}
+	applyHeaders(headers, current)
+	headers.Set("OpenAI-Beta", "responses_websockets=2026-02-06")
+	headers.Set("session_id", sessionID)
+	headers.Set("x-client-request-id", sessionID)
+	if state := strings.TrimSpace(session.turnState); state != "" {
+		headers.Set("x-codex-turn-state", state)
+	}
+
+	log.Info().
+		Str("session_id", sessionID).
+		Bool("turn_state_present", strings.TrimSpace(session.turnState) != "").
+		Msg("codex.websocket.connect")
+
+	conn, resp, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{
+		HTTPClient:      p.httpClient,
+		HTTPHeader:      headers,
+		CompressionMode: websocket.CompressionContextTakeover,
+	})
+	if err != nil {
+		statusCode := 0
+		if resp != nil {
+			statusCode = resp.StatusCode
+		}
+		log.Error().
+			Str("session_id", sessionID).
+			Str("url", wsURL).
+			Int("status_code", statusCode).
+			Err(err).
+			Msg("codex.websocket.connect.error")
+		return false, err
+	}
+	if resp != nil {
+		if turnState := strings.TrimSpace(resp.Header.Get("x-codex-turn-state")); turnState != "" {
+			session.turnState = turnState
+		}
+	}
+	session.conn = conn
+
+	log.Info().
+		Str("session_id", sessionID).
+		Bool("turn_state_present", strings.TrimSpace(session.turnState) != "").
+		Msg("codex.websocket.connected")
+	return false, nil
+}
+
+func (p *Provider) dropWebsocketSession(sessionID string, reason string) {
+	if p == nil || strings.TrimSpace(sessionID) == "" {
+		return
+	}
+	p.wsMu.Lock()
+	session := p.wsSessions[sessionID]
+	delete(p.wsSessions, sessionID)
+	p.wsMu.Unlock()
+	if session == nil {
+		return
+	}
+	session.close(reason)
+	log.Info().
+		Str("session_id", sessionID).
+		Str("reason", reason).
+		Msg("codex.websocket.closed")
+}
+
+func (p *Provider) removeWebsocketSession(sessionID string, target *websocketSession) {
+	if p == nil || strings.TrimSpace(sessionID) == "" {
+		return
+	}
+	p.wsMu.Lock()
+	defer p.wsMu.Unlock()
+	if current := p.wsSessions[sessionID]; current == target {
+		delete(p.wsSessions, sessionID)
+	}
+}
+
+func (p *Provider) streamWebsocketResponse(ctx context.Context, plan responseRequestPlan, yield func(*blades.ModelResponse, error) bool) error {
+	session, connectionReused, err := p.ensureWebsocketSession(ctx, plan.SessionID)
+	if err != nil {
+		return err
+	}
+
+	payload, err := buildWebsocketRequestPayload(plan.Params)
+	if err != nil {
+		return err
+	}
+
+	log.Info().
+		Str("session_id", plan.SessionID).
+		Bool("connection_reused", connectionReused).
+		Bool("previous_response_id_enabled", plan.UsedPreviousResponse).
+		Bool("prompt_cache_key_enabled", plan.Params.PromptCacheKey.Valid()).
+		Int("request_bytes", len(payload)).
+		Msg("codex.websocket.request")
+
+	session.mu.Lock()
+	if session.conn == nil {
+		session.mu.Unlock()
+		return fmt.Errorf("codex websocket session is unavailable")
+	}
+
+	if err := session.conn.Write(ctx, websocket.MessageText, payload); err != nil {
+		_ = session.conn.Close(websocket.StatusInternalError, "write_failed")
+		session.conn = nil
+		session.mu.Unlock()
+		p.removeWebsocketSession(plan.SessionID, session)
+		log.Info().
+			Str("session_id", plan.SessionID).
+			Str("reason", "write_failed").
+			Msg("codex.websocket.closed")
+		return err
+	}
+
+	for {
+		typ, data, err := session.conn.Read(ctx)
+		if err != nil {
+			_ = session.conn.Close(websocket.StatusInternalError, "read_failed")
+			session.conn = nil
+			session.mu.Unlock()
+			p.removeWebsocketSession(plan.SessionID, session)
+			log.Info().
+				Str("session_id", plan.SessionID).
+				Str("reason", "read_failed").
+				Msg("codex.websocket.closed")
+			return err
+		}
+		if typ != websocket.MessageText {
+			continue
+		}
+
+		var event responses.ResponseStreamEventUnion
+		if err := json.Unmarshal(data, &event); err != nil {
+			continue
+		}
+		switch ev := event.AsAny().(type) {
+		case responses.ResponseTextDeltaEvent:
+			if ev.Delta == "" {
+				continue
+			}
+			if !yield(incompleteTextResponse(ev.Delta), nil) {
+				session.mu.Unlock()
+				return nil
+			}
+		case responses.ResponseReasoningSummaryTextDeltaEvent:
+			if ev.Delta == "" {
+				continue
+			}
+			if !yield(incompleteReasoningResponse(ev.Delta), nil) {
+				session.mu.Unlock()
+				return nil
+			}
+		case responses.ResponseReasoningTextDeltaEvent:
+			if ev.Delta == "" {
+				continue
+			}
+			if !yield(incompleteReasoningResponse(ev.Delta), nil) {
+				session.mu.Unlock()
+				return nil
+			}
+		case responses.ResponseCompletedEvent:
+			p.rememberResponseChain(plan, ev.Response.ID)
+			if !yield(responseToModelResponse(&ev.Response), nil) {
+				session.mu.Unlock()
+				return nil
+			}
+			session.mu.Unlock()
+			return nil
+		case responses.ResponseFailedEvent:
+			session.mu.Unlock()
+			return fmt.Errorf("codex response failed: %s", ev.Response.Error.Message)
+		case responses.ResponseIncompleteEvent:
+			session.mu.Unlock()
+			return fmt.Errorf("codex response incomplete: %s", ev.Response.IncompleteDetails.Reason)
+		case responses.ResponseErrorEvent:
+			session.mu.Unlock()
+			return fmt.Errorf("codex response error: %s", ev.Message)
+		}
+	}
+}
+
+func buildWebsocketRequestPayload(params responses.ResponseNewParams) ([]byte, error) {
+	body, err := json.Marshal(params)
+	if err != nil {
+		return nil, err
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, err
+	}
+	payload["type"] = "response.create"
+	return json.Marshal(payload)
+}
+
+func (s *websocketSession) close(reason string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.conn == nil {
+		return
+	}
+	_ = s.conn.Close(websocket.StatusNormalClosure, reason)
+	s.conn = nil
+}
+
+func buildRequestFingerprint(model string, reasoningEffort string, req *blades.ModelRequest) (string, error) {
+	var toolPayload any
+	if len(req.Tools) > 0 {
+		tools, err := toTools(req.Tools)
+		if err != nil {
+			return "", err
+		}
+		toolPayload = tools
+	}
+	var outputSchema any
+	if req.OutputSchema != nil {
+		raw, err := schemaJSONValue(req.OutputSchema)
+		if err != nil {
+			return "", err
+		}
+		outputSchema = raw
+	}
+	payload := map[string]any{
+		"model":            model,
+		"instruction":      messageText(req.Instruction),
+		"reasoning_effort": reasoningEffort,
+		"tools":            toolPayload,
+		"output_schema":    outputSchema,
+	}
+	return stableHash(payload)
+}
+
+func hashMessages(messages []*blades.Message) (string, error) {
+	input, err := toInputItems(messages)
+	if err != nil {
+		return "", err
+	}
+	return stableHash(input)
+}
+
+func schemaJSONValue(schema any) (any, error) {
+	if schema == nil {
+		return nil, nil
+	}
+	data, err := json.Marshal(schema)
+	if err != nil {
+		return nil, err
+	}
+	var decoded any
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return nil, err
+	}
+	return decoded, nil
+}
+
+func stableHash(v any) (string, error) {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+func cloneMessages(messages []*blades.Message) []*blades.Message {
+	if len(messages) == 0 {
+		return nil
+	}
+	cloned := make([]*blades.Message, 0, len(messages))
+	for _, msg := range messages {
+		if msg == nil {
+			cloned = append(cloned, nil)
+			continue
+		}
+		cloned = append(cloned, msg.Clone())
+	}
+	return cloned
 }
 
 func toInputItems(messages []*blades.Message) (responses.ResponseInputParam, error) {
@@ -938,19 +1359,30 @@ func normalizedCodexArch() string {
 	}
 }
 
+func responsesWebsocketURL() (string, error) {
+	base, err := url.Parse(backendBaseURL)
+	if err != nil {
+		return "", err
+	}
+	rewriteCodexPath(base)
+	switch base.Scheme {
+	case "http":
+		base.Scheme = "ws"
+	case "https":
+		base.Scheme = "wss"
+	}
+	return base.String(), nil
+}
+
 func rewriteCodexPath(u *url.URL) {
 	if u == nil {
 		return
 	}
-	u.Path = strings.Replace(u.Path, "/backend-api/responses", "/backend-api/codex/responses", 1)
-}
-
-func cloneURL(u *url.URL) *url.URL {
-	if u == nil {
-		return nil
+	if strings.Contains(u.Path, "/backend-api/responses") {
+		u.Path = strings.Replace(u.Path, "/backend-api/responses", "/backend-api/codex/responses", 1)
+		return
 	}
-	cloned := *u
-	return &cloned
+	u.Path = strings.TrimRight(u.Path, "/") + "/codex/responses"
 }
 
 func cloneTokens(current *tokens) *tokens {

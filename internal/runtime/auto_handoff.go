@@ -8,6 +8,7 @@ import (
 	"github.com/go-kratos/blades"
 	"github.com/pkoukk/tiktoken-go"
 	log "github.com/yuchanns/bugo/internal/logging"
+	"github.com/yuchanns/bugo/internal/modelctx"
 	"github.com/yuchanns/bugo/internal/modelparts"
 )
 
@@ -25,6 +26,7 @@ type AutoHandoffConfig struct {
 	Instruction   string
 	Summarizer    blades.ModelProvider
 	Tapes         *TapeStore
+	OnCheckpoint  func(string)
 }
 
 type AutoHandoffContextManager struct {
@@ -33,6 +35,7 @@ type AutoHandoffContextManager struct {
 	instruction   *blades.Message
 	summarizer    blades.ModelProvider
 	tapes         *TapeStore
+	onCheckpoint  func(string)
 	encoder       *tiktoken.Tiktoken
 }
 
@@ -66,6 +69,7 @@ func NewAutoHandoffContextManager(cfg AutoHandoffConfig) (*AutoHandoffContextMan
 		instruction:   blades.SystemMessage(cfg.Instruction),
 		summarizer:    cfg.Summarizer,
 		tapes:         cfg.Tapes,
+		onCheckpoint:  cfg.OnCheckpoint,
 		encoder:       encoder,
 	}, nil
 }
@@ -133,6 +137,9 @@ func (m *AutoHandoffContextManager) Prepare(ctx context.Context, messages []*bla
 	}); err != nil {
 		return nil, err
 	}
+	if m.onCheckpoint != nil {
+		m.onCheckpoint(session.ID())
+	}
 	for _, msg := range active {
 		if err := session.Append(ctx, msg); err != nil {
 			return nil, err
@@ -181,6 +188,7 @@ func (m *AutoHandoffContextManager) generateSummaryResponse(ctx context.Context,
 	if m == nil || m.summarizer == nil {
 		return nil, fmt.Errorf("auto handoff summarizer is required")
 	}
+	ctx = modelctx.DisableResponseChain(ctx)
 
 	var (
 		finalResp *blades.ModelResponse

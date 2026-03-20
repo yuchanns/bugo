@@ -306,6 +306,7 @@ func (a *App) execTapeHandoff(inbox *sessionInbox, parsed parsedCommandArgs) (st
 	}); err != nil {
 		return "", err
 	}
+	a.invalidateSessionModelState(inbox.session.ID())
 	return fmt.Sprintf("handoff created: %s", name), nil
 }
 
@@ -405,6 +406,7 @@ func (a *App) execTapeReset(inbox *sessionInbox, parsed parsedCommandArgs) (stri
 	}
 	inbox.session.Reset()
 	inbox.resetRuntime()
+	a.invalidateSessionModelState(inbox.session.ID())
 	return result, nil
 }
 
