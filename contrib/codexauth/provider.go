@@ -130,7 +130,7 @@ func (p *Provider) Name() string {
 }
 
 func (p *Provider) Generate(ctx context.Context, req *blades.ModelRequest) (*blades.ModelResponse, error) {
-	params, err := p.toResponsesParams(req)
+	params, err := p.toResponsesParams(ctx, req)
 	if err != nil {
 		return nil, err
 	}
@@ -143,7 +143,7 @@ func (p *Provider) Generate(ctx context.Context, req *blades.ModelRequest) (*bla
 
 func (p *Provider) NewStreaming(ctx context.Context, req *blades.ModelRequest) blades.Generator[*blades.ModelResponse, error] {
 	return func(yield func(*blades.ModelResponse, error) bool) {
-		params, err := p.toResponsesParams(req)
+		params, err := p.toResponsesParams(ctx, req)
 		if err != nil {
 			yield(nil, err)
 			return
@@ -354,7 +354,7 @@ func (t *codexTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return t.base.RoundTrip(cloned)
 }
 
-func (p *Provider) toResponsesParams(req *blades.ModelRequest) (responses.ResponseNewParams, error) {
+func (p *Provider) toResponsesParams(ctx context.Context, req *blades.ModelRequest) (responses.ResponseNewParams, error) {
 	if req == nil {
 		return responses.ResponseNewParams{}, fmt.Errorf("model request is required")
 	}
@@ -402,7 +402,21 @@ func (p *Provider) toResponsesParams(req *blades.ModelRequest) (responses.Respon
 		}
 		params.Text.Format = format
 	}
+	if promptCacheKey := promptCacheKeyFromContext(ctx); promptCacheKey != "" {
+		params.PromptCacheKey = param.NewOpt(promptCacheKey)
+	}
 	return params, nil
+}
+
+func promptCacheKeyFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	session, ok := blades.FromSessionContext(ctx)
+	if !ok || session == nil {
+		return ""
+	}
+	return strings.TrimSpace(session.ID())
 }
 
 func toInputItems(messages []*blades.Message) (responses.ResponseInputParam, error) {
