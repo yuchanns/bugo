@@ -32,18 +32,19 @@ import (
 )
 
 const (
-	oauthClientID      = "app_EMoamEEZ73f0CkXaXp7hrann"
-	oauthAuthorizeURL  = "https://auth.openai.com/oauth/authorize"
-	oauthTokenURL      = "https://auth.openai.com/oauth/token"
-	oauthRedirectURI   = "http://localhost:1455/auth/callback"
-	oauthScopes        = "openid profile email offline_access"
-	backendBaseURL     = "https://chatgpt.com/backend-api/"
-	modelsURL          = backendBaseURL + "codex/models?client_version=1.0.0"
-	authCallbackAddr   = ":1455"
-	authExpiryBuffer   = 5 * time.Minute
-	authPendingTimeout = 10 * time.Minute
-	codexOriginator    = "codex_cli_rs"
-	codexClientVersion = "1.0.0"
+	oauthClientID        = "app_EMoamEEZ73f0CkXaXp7hrann"
+	oauthAuthorizeURL    = "https://auth.openai.com/oauth/authorize"
+	oauthTokenURL        = "https://auth.openai.com/oauth/token"
+	oauthRedirectURI     = "http://localhost:1455/auth/callback"
+	oauthScopes          = "openid profile email offline_access"
+	backendBaseURL       = "https://chatgpt.com/backend-api/"
+	modelsURL            = backendBaseURL + "codex/models?client_version=1.0.0"
+	authCallbackAddr     = ":1455"
+	authExpiryBuffer     = 5 * time.Minute
+	authPendingTimeout   = 10 * time.Minute
+	codexOriginator      = "codex_cli_rs"
+	codexClientVersion   = "1.0.0"
+	websocketPingTimeout = 5 * time.Second
 )
 
 type Config struct {
@@ -99,6 +100,14 @@ type websocketSession struct {
 	mu        sync.Mutex
 	conn      *websocket.Conn
 	turnState string
+	active    bool
+	messages  chan websocketMessage
+}
+
+type websocketMessage struct {
+	typ  websocket.MessageType
+	data []byte
+	err  error
 }
 
 type responseChainState struct {
@@ -176,15 +185,38 @@ func (p *Provider) Generate(ctx context.Context, req *blades.ModelRequest) (*bla
 
 func (p *Provider) NewStreaming(ctx context.Context, req *blades.ModelRequest) blades.Generator[*blades.ModelResponse, error] {
 	return func(yield func(*blades.ModelResponse, error) bool) {
-		plan, err := p.buildResponseRequestPlan(ctx, req)
-		if err != nil {
-			yield(nil, err)
-			return
-		}
+		for attempt := range 2 {
+			plan, err := p.buildResponseRequestPlan(ctx, req)
+			if err != nil {
+				yield(nil, err)
+				return
+			}
 
-		if err := p.streamWebsocketResponse(ctx, plan, yield); err != nil {
+			emitted := false
+			wrappedYield := func(resp *blades.ModelResponse, err error) bool {
+				if resp != nil {
+					emitted = true
+				}
+				return yield(resp, err)
+			}
+
+			err = p.streamWebsocketResponse(ctx, plan, wrappedYield)
+			if err == nil {
+				return
+			}
+			if attempt == 0 && p.shouldRetryWebsocketStream(err, emitted, plan) {
+				log.Warn().
+					Str("session_id", plan.SessionID).
+					Str("reason", websocketRetryReason(err)).
+					Bool("previous_response_id_enabled", plan.UsedPreviousResponse).
+					Msg("codex.websocket.retry")
+				p.ResetSessionChain(plan.SessionID)
+				continue
+			}
+
 			p.clearResponseChainOnError(plan)
 			yield(nil, err)
+			return
 		}
 	}
 }
@@ -512,13 +544,48 @@ func (p *Provider) clearResponseChainOnError(plan responseRequestPlan) {
 	p.ResetSessionChain(plan.SessionID)
 }
 
+func (p *Provider) shouldRetryWebsocketStream(err error, emitted bool, plan responseRequestPlan) bool {
+	if p == nil || err == nil || emitted || strings.TrimSpace(plan.SessionID) == "" {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	return websocketRetryReason(err) != ""
+}
+
+func websocketRetryReason(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "keepalive ping timeout"):
+		return "keepalive_ping_timeout"
+	case strings.Contains(msg, "failed to ping"):
+		return "ping_failed"
+	case strings.Contains(msg, "websocket stream closed"):
+		return "stream_closed"
+	case strings.Contains(msg, "websocket session is unavailable"):
+		return "session_unavailable"
+	case strings.Contains(msg, "received close frame"):
+		return "server_closed_connection"
+	case strings.Contains(msg, "failed to get reader"):
+		return "read_failed"
+	case strings.Contains(msg, "failed to send websocket request"):
+		return "write_failed"
+	default:
+		return ""
+	}
+}
+
 func (p *Provider) hasActiveWebsocketSession(sessionID string) bool {
 	if p == nil || strings.TrimSpace(sessionID) == "" {
 		return false
 	}
 	p.wsMu.Lock()
 	defer p.wsMu.Unlock()
-	return p.wsSessions[sessionID] != nil
+	return p.wsSessions[sessionID] != nil && p.wsSessions[sessionID].isActive()
 }
 
 func (p *Provider) ensureWebsocketSession(ctx context.Context, sessionID string) (*websocketSession, bool, error) {
@@ -548,10 +615,20 @@ func (p *Provider) connectWebsocketSession(ctx context.Context, sessionID string
 	}
 
 	session.mu.Lock()
-	defer session.mu.Unlock()
 	if session.conn != nil {
-		return true, nil
+		pingCtx, cancel := context.WithTimeout(ctx, websocketPingTimeout)
+		err := session.conn.Ping(pingCtx)
+		cancel()
+		if err == nil {
+			session.mu.Unlock()
+			return true, nil
+		}
+		_ = session.conn.Close(websocket.StatusInternalError, "ping_failed")
+		session.conn = nil
+		session.active = false
+		session.messages = nil
 	}
+	session.mu.Unlock()
 
 	current, err := p.getValidTokens(ctx)
 	if err != nil {
@@ -598,7 +675,12 @@ func (p *Provider) connectWebsocketSession(ctx context.Context, sessionID string
 			session.turnState = turnState
 		}
 	}
+	session.mu.Lock()
 	session.conn = conn
+	session.active = true
+	session.messages = make(chan websocketMessage, 256)
+	session.mu.Unlock()
+	p.startWebsocketPump(sessionID, session, conn)
 
 	log.Info().
 		Str("session_id", sessionID).
@@ -656,14 +738,17 @@ func (p *Provider) streamWebsocketResponse(ctx context.Context, plan responseReq
 		Msg("codex.websocket.request")
 
 	session.mu.Lock()
-	if session.conn == nil {
+	conn := session.conn
+	if conn == nil || !session.active || session.messages == nil {
 		session.mu.Unlock()
 		return fmt.Errorf("codex websocket session is unavailable")
 	}
 
-	if err := session.conn.Write(ctx, websocket.MessageText, payload); err != nil {
-		_ = session.conn.Close(websocket.StatusInternalError, "write_failed")
+	if err := conn.Write(ctx, websocket.MessageText, payload); err != nil {
+		_ = conn.Close(websocket.StatusInternalError, "write_failed")
 		session.conn = nil
+		session.active = false
+		session.messages = nil
 		session.mu.Unlock()
 		p.removeWebsocketSession(plan.SessionID, session)
 		log.Info().
@@ -672,26 +757,27 @@ func (p *Provider) streamWebsocketResponse(ctx context.Context, plan responseReq
 			Msg("codex.websocket.closed")
 		return err
 	}
+	session.mu.Unlock()
 
 	for {
-		typ, data, err := session.conn.Read(ctx)
-		if err != nil {
-			_ = session.conn.Close(websocket.StatusInternalError, "read_failed")
-			session.conn = nil
-			session.mu.Unlock()
+		msg, ok := session.nextMessage(ctx)
+		if !ok {
+			return fmt.Errorf("codex websocket stream closed")
+		}
+		if msg.err != nil {
 			p.removeWebsocketSession(plan.SessionID, session)
 			log.Info().
 				Str("session_id", plan.SessionID).
 				Str("reason", "read_failed").
 				Msg("codex.websocket.closed")
-			return err
+			return msg.err
 		}
-		if typ != websocket.MessageText {
+		if msg.typ != websocket.MessageText {
 			continue
 		}
 
 		var event responses.ResponseStreamEventUnion
-		if err := json.Unmarshal(data, &event); err != nil {
+		if err := json.Unmarshal(msg.data, &event); err != nil {
 			continue
 		}
 		switch ev := event.AsAny().(type) {
@@ -700,7 +786,6 @@ func (p *Provider) streamWebsocketResponse(ctx context.Context, plan responseReq
 				continue
 			}
 			if !yield(incompleteTextResponse(ev.Delta), nil) {
-				session.mu.Unlock()
 				return nil
 			}
 		case responses.ResponseReasoningSummaryTextDeltaEvent:
@@ -708,7 +793,6 @@ func (p *Provider) streamWebsocketResponse(ctx context.Context, plan responseReq
 				continue
 			}
 			if !yield(incompleteReasoningResponse(ev.Delta), nil) {
-				session.mu.Unlock()
 				return nil
 			}
 		case responses.ResponseReasoningTextDeltaEvent:
@@ -716,30 +800,116 @@ func (p *Provider) streamWebsocketResponse(ctx context.Context, plan responseReq
 				continue
 			}
 			if !yield(incompleteReasoningResponse(ev.Delta), nil) {
-				session.mu.Unlock()
 				return nil
 			}
 		case responses.ResponseCompletedEvent:
 			p.rememberResponseChain(plan, ev.Response.ID)
 			if !yield(responseToModelResponse(&ev.Response), nil) {
-				session.mu.Unlock()
 				return nil
 			}
-			session.mu.Unlock()
 			return nil
 		case responses.ResponseFailedEvent:
-			session.mu.Unlock()
 			return fmt.Errorf("codex response failed: %s", ev.Response.Error.Message)
 		case responses.ResponseIncompleteEvent:
-			session.mu.Unlock()
 			return fmt.Errorf("codex response incomplete: %s", ev.Response.IncompleteDetails.Reason)
 		case responses.ResponseErrorEvent:
-			session.mu.Unlock()
 			return fmt.Errorf("codex response error: %s", ev.Message)
 		}
 	}
 }
 
+func (p *Provider) startWebsocketPump(sessionID string, session *websocketSession, conn *websocket.Conn) {
+	if p == nil || session == nil || conn == nil {
+		return
+	}
+	go func() {
+		for {
+			typ, data, err := conn.Read(context.Background())
+			if err != nil {
+				session.fail(err, conn)
+				return
+			}
+			session.push(websocketMessage{typ: typ, data: data}, conn)
+		}
+	}()
+}
+
+func (s *websocketSession) push(msg websocketMessage, conn *websocket.Conn) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	ch := s.messages
+	active := s.active && s.conn == conn
+	s.mu.Unlock()
+	if !active || ch == nil {
+		return
+	}
+	ch <- msg
+}
+
+func (s *websocketSession) fail(err error, conn *websocket.Conn) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	if s.conn != conn {
+		s.mu.Unlock()
+		return
+	}
+	ch := s.messages
+	s.conn = nil
+	s.active = false
+	s.messages = nil
+	s.mu.Unlock()
+	if ch != nil {
+		ch <- websocketMessage{err: err}
+		close(ch)
+	}
+}
+
+func (s *websocketSession) nextMessage(ctx context.Context) (websocketMessage, bool) {
+	if s == nil {
+		return websocketMessage{}, false
+	}
+	s.mu.Lock()
+	ch := s.messages
+	s.mu.Unlock()
+	if ch == nil {
+		return websocketMessage{}, false
+	}
+	select {
+	case <-ctx.Done():
+		return websocketMessage{err: ctx.Err()}, true
+	case msg, ok := <-ch:
+		return msg, ok
+	}
+}
+
+func (s *websocketSession) isActive() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.active && s.conn != nil && s.messages != nil
+}
+
+func (s *websocketSession) close(reason string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	conn := s.conn
+	s.conn = nil
+	s.active = false
+	s.messages = nil
+	s.mu.Unlock()
+	if conn == nil {
+		return
+	}
+	_ = conn.Close(websocket.StatusNormalClosure, reason)
+}
 func buildWebsocketRequestPayload(params responses.ResponseNewParams) ([]byte, error) {
 	body, err := json.Marshal(params)
 	if err != nil {
@@ -751,19 +921,6 @@ func buildWebsocketRequestPayload(params responses.ResponseNewParams) ([]byte, e
 	}
 	payload["type"] = "response.create"
 	return json.Marshal(payload)
-}
-
-func (s *websocketSession) close(reason string) {
-	if s == nil {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.conn == nil {
-		return
-	}
-	_ = s.conn.Close(websocket.StatusNormalClosure, reason)
-	s.conn = nil
 }
 
 func buildRequestFingerprint(model string, reasoningEffort string, req *blades.ModelRequest) (string, error) {
