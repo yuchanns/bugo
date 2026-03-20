@@ -145,6 +145,7 @@ func (a *App) buildAgent() (blades.Agent, blades.ModelProvider, error) {
 		blades.WithMiddleware(
 			runtime.AgentRetryMiddleware(),
 			workspaceAgentsPromptMiddleware(a.workDir),
+			runtime.WrapToolMiddleware(a.cfg.Model, a.cfg.ModelContextWindow),
 			runtime.SkillToolLoggingMiddleware(),
 			runtime.PatchToolSchemas(),
 		),

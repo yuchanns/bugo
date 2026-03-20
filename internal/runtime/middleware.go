@@ -17,6 +17,7 @@ import (
 	"github.com/go-kratos/kit/retry"
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/openai/openai-go/v3"
+	"github.com/pkoukk/tiktoken-go"
 	log "github.com/yuchanns/bugo/internal/logging"
 )
 
@@ -77,6 +78,31 @@ func SkillToolLoggingMiddleware() blades.Middleware {
 	}
 }
 
+func WrapToolMiddleware(model string, limit int) blades.Middleware {
+	return func(next blades.Handler) blades.Handler {
+		return blades.HandleFunc(func(ctx context.Context, invocation *blades.Invocation) blades.Generator[*blades.Message, error] {
+			if invocation == nil || len(invocation.Tools) == 0 {
+				return next.Handle(ctx, invocation)
+			}
+			cloned := invocation.Clone()
+			for i, tool := range cloned.Tools {
+				if tool == nil {
+					continue
+				}
+				if _, ok := tool.(*wrappedTool); ok {
+					continue
+				}
+				cloned.Tools[i] = &wrappedTool{
+					Tool:  tool,
+					model: model,
+					limit: limit,
+				}
+			}
+			return next.Handle(ctx, cloned)
+		})
+	}
+}
+
 func isSkillToolName(name string) bool {
 	switch name {
 	case skills.ToolListSkillsName,
@@ -108,6 +134,50 @@ func (t *skillLoggedTool) Handle(ctx context.Context, input string) (string, err
 	}
 	logSkillToolSuccess(ctx, t.Name(), input, output, elapsed)
 	return output, nil
+}
+
+type wrappedTool struct {
+	tools.Tool
+	model string
+	limit int
+}
+
+func (t *wrappedTool) Handle(ctx context.Context, input string) (string, error) {
+	output, err := t.Tool.Handle(ctx, input)
+	if err != nil || strings.TrimSpace(output) == "" || t.limit <= 0 {
+		return output, err
+	}
+	outputTokens, err := ApproximateTextTokens(t.model, output)
+	if err != nil || outputTokens <= t.limit {
+		return output, err
+	}
+	log.Warn().
+		Str("tool_name", t.Name()).
+		Int("output_tokens", outputTokens).
+		Int("token_limit", t.limit).
+		Msg("tool.output.context_limited")
+	payload, marshalErr := json.Marshal(map[string]any{
+		"warning":       "Tool output exceeded the current context limit. Narrow the request, reduce returned data, or use a more targeted tool strategy.",
+		"error_code":    "CONTEXT_LIMIT_EXCEEDED",
+		"tool_name":     t.Name(),
+		"output_tokens": outputTokens,
+		"token_limit":   t.limit,
+	})
+	if marshalErr != nil {
+		return `{"warning":"Tool output exceeded the current context limit.","error_code":"CONTEXT_LIMIT_EXCEEDED"}`, nil
+	}
+	return string(payload), nil
+}
+
+func ApproximateTextTokens(model string, text string) (int, error) {
+	encoder, err := tiktoken.EncodingForModel(model)
+	if err != nil {
+		encoder, err = tiktoken.GetEncoding("cl100k_base")
+	}
+	if err != nil {
+		return 0, err
+	}
+	return len(encoder.Encode(text, nil, nil)), nil
 }
 
 func logSkillToolStart(ctx context.Context, name string, input string) {
