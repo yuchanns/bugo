@@ -113,7 +113,9 @@ Examples:
 
 - Tape files: `~/.bugo/tapes/*.jsonl`
 - Codex auth file: `~/.bugo/providers/openai-codex-auth.json`
+- Scheduled jobs: `<workdir>/.bugo/schedules.json`
 - Each session maps to one append-only JSONL tape
+- Scheduled jobs are restored and re-registered automatically on startup
 
 ## Development
 

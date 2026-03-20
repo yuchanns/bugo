@@ -70,7 +70,7 @@ func NewApp(cfg Config) (*App, error) {
 		inboxes:  newInboxHub(sessions),
 		workDir:  workDir,
 	}
-	app.schedule, err = NewScheduleStore(app.handleScheduledMessage)
+	app.schedule, err = NewScheduleStore(filepath.Join(workDir, ".bugo", "schedules.json"), app.handleScheduledMessage)
 	if err != nil {
 		return nil, err
 	}
