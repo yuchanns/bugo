@@ -35,6 +35,17 @@ export BUGO_MODEL="openai:gpt-4o-mini"
 bugo
 ```
 
+For Copilot-compatible OpenAI APIs:
+
+```bash
+export BUGO_TELEGRAM_TOKEN="123456:xxxx"
+export BUGO_API_KEY="copilot-token"
+export BUGO_API_BASE="https://your-copilot-compatible-endpoint/"
+export BUGO_MODEL="openai:gpt-4.1"
+export BUGO_WIRE_API="chat" # or responses
+bugo
+```
+
 For Codex OAuth:
 
 ```bash
@@ -100,6 +111,7 @@ Examples:
 - `BUGO_API_KEY`: model provider key, required when `BUGO_MODEL` uses `openai:*`
 - `BUGO_API_BASE`: optional provider base URL
 - `BUGO_MODEL`: required model reference in `provider:model` form, default `openai:gpt-4o-mini`
+- `BUGO_WIRE_API`: optional wire API selector, `chat` or `responses`; this is a global runtime option and providers may honor or ignore it, default `chat`
 - `BUGO_MODEL_CONTEXT_WINDOW`: required model context window in tokens; auto handoff triggers at 90% of this value
 - `BUGO_CODEX_AUTH_FILE`: optional Codex OAuth token file, default `~/.bugo/providers/openai-codex-auth.json`
 - `BUGO_MAX_ITERATIONS`: max agent iterations

@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/yuchanns/bugo/internal/wireapi"
 )
 
 const (
@@ -30,6 +32,7 @@ type Config struct {
 	MaxOutputTokens    int
 	APIKey             string
 	APIBase            string
+	WireAPI            string
 	CodexAuthFile      string
 	WorkDir            string
 	HomeDir            string
@@ -59,6 +62,7 @@ func LoadConfig() (Config, error) {
 	}
 	cfg.APIKey = env("BUGO_API_KEY")
 	cfg.APIBase = env("BUGO_API_BASE")
+	cfg.WireAPI = env("BUGO_WIRE_API")
 	cfg.CodexAuthFile = resolveHomeDir(firstNonEmpty(
 		env("BUGO_CODEX_AUTH_FILE"),
 		filepath.Join(cfg.HomeDir, "providers", "openai-codex-auth.json"),
@@ -67,14 +71,15 @@ func LoadConfig() (Config, error) {
 	if cfg.TelegramToken == "" {
 		return Config{}, fmt.Errorf("missing telegram token, set BUGO_TELEGRAM_TOKEN")
 	}
-	if cfg.Provider == "openai" && cfg.APIKey == "" {
-		return Config{}, fmt.Errorf("missing model api key, set BUGO_API_KEY")
-	}
-	if cfg.Provider != "openai" && cfg.Provider != "codex" {
-		return Config{}, fmt.Errorf("unsupported provider %q", cfg.Provider)
-	}
 	if cfg.ModelContextWindow <= 0 {
 		return Config{}, fmt.Errorf("missing model context window, set BUGO_MODEL_CONTEXT_WINDOW to a positive integer")
+	}
+	cfg.WireAPI, err = wireapi.Normalize(cfg.WireAPI)
+	if err != nil {
+		return Config{}, err
+	}
+	if err := validateProviderConfig(cfg); err != nil {
+		return Config{}, err
 	}
 
 	allowChats, err := parseInt64Set(env("BUGO_TELEGRAM_ALLOW_CHATS"))

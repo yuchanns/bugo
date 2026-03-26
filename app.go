@@ -16,12 +16,10 @@ import (
 	"time"
 
 	"github.com/go-kratos/blades"
-	"github.com/go-kratos/blades/contrib/openai"
 	"github.com/go-kratos/blades/skills"
 	"github.com/go-kratos/blades/tools"
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
-	"github.com/openai/openai-go/v3/option"
 	"github.com/yuchanns/bugo/contrib/codexauth"
 	log "github.com/yuchanns/bugo/internal/logging"
 	"github.com/yuchanns/bugo/internal/modelparts"
@@ -158,39 +156,11 @@ func (a *App) buildAgent() (blades.Agent, blades.ModelProvider, error) {
 }
 
 func (a *App) buildModelProvider() (blades.ModelProvider, error) {
-	switch a.cfg.Provider {
-	case "openai":
-		a.codex = nil
-		a.sessionChainState = nil
-		modelConfig := openai.Config{
-			BaseURL:         a.cfg.APIBase,
-			APIKey:          a.cfg.APIKey,
-			MaxOutputTokens: int64(a.cfg.MaxOutputTokens),
-			RequestOptions: []option.RequestOption{
-				option.WithHTTPClient(newOpenAIHTTPClient()),
-			},
-		}
-		return openai.NewModel(a.cfg.Model, modelConfig), nil
-	case "codex":
-		if a.codex != nil && a.codex.Name() == a.cfg.Model {
-			a.sessionChainState = a.codex
-			return a.codex, nil
-		}
-		provider, err := codexauth.New(codexauth.Config{
-			Model:           a.cfg.Model,
-			AuthFile:        a.cfg.CodexAuthFile,
-			MaxOutputTokens: int64(a.cfg.MaxOutputTokens),
-			HTTPClient:      newOpenAIHTTPClient(),
-		})
-		if err != nil {
-			return nil, err
-		}
-		a.codex = provider
-		a.sessionChainState = provider
-		return provider, nil
-	default:
-		return nil, fmt.Errorf("unsupported provider %q", a.cfg.Provider)
+	spec, err := lookupProviderSpec(a.cfg.Provider)
+	if err != nil {
+		return nil, err
 	}
+	return spec.build(a)
 }
 
 func newOpenAIHTTPClient() *http.Client {
