@@ -2,3 +2,4 @@ vendor/
 .agent
 .agents
 skills-lock.json
+.codex

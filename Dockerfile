@@ -73,6 +73,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     npm \
     openssh-client \
     procps \
+    python3 \
+    python3-venv \
     ripgrep \
     sudo \
     tini \
