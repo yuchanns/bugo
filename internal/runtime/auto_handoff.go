@@ -13,7 +13,8 @@ import (
 )
 
 const (
-	autoHandoffLimitPercent = 90
+	autoHandoffLimitPercent        = 90
+	autoHandoffActiveSuffixPercent = 70
 
 	autoHandoffPromptPrefix = "For this turn, do not continue the task. " +
 		"Produce only a concise handoff summary of the conversation shown above. " +
@@ -30,13 +31,14 @@ type AutoHandoffConfig struct {
 }
 
 type AutoHandoffContextManager struct {
-	contextWindow int
-	maxTokens     int
-	instruction   *blades.Message
-	summarizer    blades.ModelProvider
-	tapes         *TapeStore
-	onCheckpoint  func(string)
-	encoder       *tiktoken.Tiktoken
+	contextWindow     int
+	maxTokens         int
+	instruction       *blades.Message
+	summarizer        blades.ModelProvider
+	tapes             *TapeStore
+	onCheckpoint      func(string)
+	encoder           *tiktoken.Tiktoken
+	instructionTokens int
 }
 
 func NewAutoHandoffContextManager(cfg AutoHandoffConfig) (*AutoHandoffContextManager, error) {
@@ -58,19 +60,25 @@ func NewAutoHandoffContextManager(cfg AutoHandoffConfig) (*AutoHandoffContextMan
 		return nil, fmt.Errorf("auto handoff encoder: %w", err)
 	}
 
+	instructionTokens := 0
+	if trimmed := strings.TrimSpace(cfg.Instruction); trimmed != "" {
+		instructionTokens = len(encoder.Encode(trimmed, nil, nil))
+	}
 	maxTokens := (cfg.ContextWindow * autoHandoffLimitPercent) / 100
+	maxTokens -= instructionTokens
 	if maxTokens <= 0 {
 		return nil, fmt.Errorf("auto handoff derived token limit must be positive")
 	}
 
 	return &AutoHandoffContextManager{
-		contextWindow: cfg.ContextWindow,
-		maxTokens:     maxTokens,
-		instruction:   blades.SystemMessage(cfg.Instruction),
-		summarizer:    cfg.Summarizer,
-		tapes:         cfg.Tapes,
-		onCheckpoint:  cfg.OnCheckpoint,
-		encoder:       encoder,
+		contextWindow:     cfg.ContextWindow,
+		maxTokens:         maxTokens,
+		instruction:       blades.SystemMessage(cfg.Instruction),
+		summarizer:        cfg.Summarizer,
+		tapes:             cfg.Tapes,
+		onCheckpoint:      cfg.OnCheckpoint,
+		encoder:           encoder,
+		instructionTokens: instructionTokens,
 	}, nil
 }
 
@@ -93,6 +101,7 @@ func (m *AutoHandoffContextManager) Prepare(ctx context.Context, messages []*bla
 	log.Info().
 		Str("session_id", session.ID()).
 		Int("context_window", m.contextWindow).
+		Int("instruction_tokens", m.instructionTokens).
 		Int("history_tokens", tokenCount).
 		Int("auto_handoff_limit", m.maxTokens).
 		Float64("token_ratio", ratio).
@@ -105,8 +114,14 @@ func (m *AutoHandoffContextManager) Prepare(ctx context.Context, messages []*bla
 	}
 
 	splitAt, ok := findActiveSuffixStart(history, messages)
-	if !ok || splitAt <= 0 {
+	if !ok {
 		return cloneMessages(history), nil
+	}
+	if splitAt <= 0 {
+		splitAt = m.fallbackSplitAt(history)
+		if splitAt <= 0 {
+			return cloneMessages(history), nil
+		}
 	}
 
 	archive := cloneMessages(history[:splitAt])
@@ -115,6 +130,7 @@ func (m *AutoHandoffContextManager) Prepare(ctx context.Context, messages []*bla
 	log.Info().
 		Str("session_id", session.ID()).
 		Int("context_window", m.contextWindow).
+		Int("instruction_tokens", m.instructionTokens).
 		Int("history_tokens", tokenCount).
 		Int("auto_handoff_limit", m.maxTokens).
 		Int("history_messages", len(history)).
@@ -155,7 +171,7 @@ func (m *AutoHandoffContextManager) Prepare(ctx context.Context, messages []*bla
 		Int("summary_chars", len(summary)).
 		Msg("tape.auto_handoff.completed")
 
-	return active, nil
+	return cloneMessages(session.History()), nil
 }
 
 func (m *AutoHandoffContextManager) summarize(ctx context.Context, history []*blades.Message) (string, error) {
@@ -230,6 +246,34 @@ func (m *AutoHandoffContextManager) countTokens(messages []*blades.Message) int 
 	return len(m.encoder.Encode(buf.String(), nil, nil))
 }
 
+func (m *AutoHandoffContextManager) fallbackSplitAt(history []*blades.Message) int {
+	if m == nil || len(history) <= 1 {
+		return 0
+	}
+	target := (m.maxTokens * autoHandoffActiveSuffixPercent) / 100
+	if target <= 0 {
+		target = m.maxTokens / 2
+	}
+	if target <= 0 {
+		return 0
+	}
+
+	suffixTokens := 0
+	splitAt := len(history) - 1
+	for i := len(history) - 1; i >= 0; i-- {
+		msgTokens := m.countTokens(history[i : i+1])
+		if i < len(history)-1 && suffixTokens+msgTokens > target {
+			break
+		}
+		suffixTokens += msgTokens
+		splitAt = i
+	}
+	if splitAt <= 0 {
+		return 0
+	}
+	return splitAt
+}
+
 func appendMessageTokenText(buf *strings.Builder, msg *blades.Message) {
 	if buf == nil || msg == nil {
 		return
@@ -254,7 +298,7 @@ func appendMessageTokenText(buf *strings.Builder, msg *blades.Message) {
 			buf.WriteByte(' ')
 			buf.WriteString(string(v.MIMEType))
 			buf.WriteString(" bytes=")
-			buf.WriteString(fmt.Sprintf("%d", len(v.Bytes)))
+			fmt.Fprintf(buf, "%d", len(v.Bytes))
 		case blades.ToolPart:
 			buf.WriteString("tool ")
 			buf.WriteString(v.Name)
